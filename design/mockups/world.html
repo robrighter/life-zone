@@ -1,0 +1,259 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>World — Life Zone</title>
+<link rel="stylesheet" href="app.css">
+<link rel="stylesheet" href="palettes.css">
+<script src="theme.js"></script>
+</head>
+<body>
+<div class="app">
+
+  <header class="topbar">
+    <span class="brand">Life Zone</span>
+    <nav class="nav">
+      <a href="index.html">Index</a>
+      <a href="world.html" aria-current="page">World</a>
+      <a href="knowledge.html">Knowledge</a>
+      <a href="creature.html">Record</a>
+      <a href="reports.html">Reports</a>
+      <a href="palettes.html">Palettes</a>
+    </nav>
+    <div class="topbar-right">
+      <div data-pal-switch></div>
+      <div class="readout"><span class="eyebrow">World</span><span class="val">Ashfen · 44127</span></div>
+      <div class="readout"><span class="eyebrow">Tick</span><span class="val">4,118</span></div>
+      <div class="readout"><span class="eyebrow">Day / hour</span><span class="val">D172 · 14:00</span></div>
+      <div class="readout"><span class="eyebrow">Alive</span><span class="val quick">118</span></div>
+      <div class="readout"><span class="eyebrow">Buried</span><span class="val still">1,043</span></div>
+    </div>
+  </header>
+
+  <div class="body" style="grid-template-columns: 214px 1fr 320px;">
+
+    <!-- ------------------------------------------------------- left rail -->
+    <aside class="panel">
+
+      <div class="sec">
+        <div class="sec-head"><span class="eyebrow">Run</span></div>
+        <div class="btn-row" style="margin-bottom:10px">
+          <button class="btn" aria-pressed="true" style="flex:1;text-align:center">Pause</button>
+          <button class="btn" style="flex:1;text-align:center">Step 1</button>
+        </div>
+        <div class="stack">
+          <button class="btn mode" aria-pressed="false"><span>Deep</span><span class="sub">unbounded · 15–60s/tick</span></button>
+          <button class="btn mode" aria-pressed="true"><span>Observe</span><span class="sub">6 calls · 1.4s/tick</span></button>
+          <button class="btn mode" aria-pressed="false"><span>Fast-forward</span><span class="sub">no LLM · 40ms/tick</span></button>
+          <button class="btn mode" aria-pressed="false"><span>Focus</span><span class="sub">follow one lineage</span></button>
+        </div>
+      </div>
+
+      <div class="sec">
+        <div class="sec-head">
+          <span class="eyebrow">Deliberation budget</span>
+          <span class="num" style="font-size:12px">6<span class="dim">/tick</span></span>
+        </div>
+        <input type="range" min="0" max="24" value="6" aria-label="LLM calls per tick">
+        <p style="font-size:11px;margin:8px 0 0">Median tick <span class="num quick">1.42s</span>. Raising the budget past 10 pushes ticks over 2s on this machine.</p>
+      </div>
+
+      <div class="sec">
+        <div class="sec-head"><span class="eyebrow">Overlays</span></div>
+        <label class="toggle"><input type="checkbox" id="o-nodes" checked> Resource patches</label>
+        <label class="toggle"><input type="checkbox" id="o-creatures" checked> Creatures <span class="swatch" style="background:var(--quick)"></span></label>
+        <label class="toggle"><input type="checkbox" id="o-household"> Colour by household</label>
+        <label class="toggle"><input type="checkbox" checked> Committed plan paths</label>
+        <label class="toggle"><input type="checkbox"> Household territory</label>
+        <label class="toggle"><input type="checkbox"> Deliberation heatmap</label>
+        <label class="toggle"><input type="checkbox"> Food density</label>
+        <label class="toggle"><input type="checkbox"> Lineage highlight</label>
+      </div>
+
+      <div class="sec">
+        <div class="sec-head"><span class="eyebrow">This tick</span></div>
+        <dl class="kv">
+          <dt>Deliberated</dt><dd class="num">6 <span class="dim">of 41 flagged</span></dd>
+          <dt>Fell back</dt><dd class="num">35 <span class="dim">tier 1</span></dd>
+          <dt>Parse fails</dt><dd class="num">0</dd>
+          <dt>Mean latency</dt><dd class="num">218 ms</dd>
+        </dl>
+      </div>
+
+      <div class="sec" style="border-bottom:0">
+        <div class="sec-head"><span class="eyebrow">Population</span></div>
+        <dl class="kv">
+          <dt>Infants</dt><dd class="num">29</dd>
+          <dt>Adults</dt><dd class="num">74</dd>
+          <dt>Elders</dt><dd class="num">15</dd>
+          <dt>Households</dt><dd class="num">9</dd>
+          <dt>Deepest line</dt><dd class="num">gen 6 <span class="dim">· Ottel</span></dd>
+        </dl>
+      </div>
+    </aside>
+
+    <!-- ------------------------------------------------------------- map -->
+    <main class="map-wrap">
+      <canvas id="map"></canvas>
+
+      <div class="map-legend">
+        <div class="leg-group">Ground</div>
+        <div class="row"><span class="sw" style="background:var(--t-shallow)"></span> Water</div>
+        <div class="row"><span class="sw" style="background:var(--t-forest)"></span> Forest</div>
+        <div class="row"><span class="sw" style="background:var(--t-soil)"></span> Soil</div>
+        <div class="row"><span class="sw" style="background:var(--t-hill)"></span> Hills</div>
+
+        <div class="leg-group">Grows there</div>
+        <div class="row"><span class="sw patch" style="background:var(--res-wheat)"></span> Wheat</div>
+        <div class="row"><span class="sw patch" style="background:var(--res-wood)"></span> Wood</div>
+        <div class="row"><span class="sw patch" style="background:var(--res-forage)"></span> Forage</div>
+
+        <div class="leg-group" id="leg-living">Moving</div>
+        <div class="row"><span class="mk mk-adult"></span> Adult</div>
+        <div class="row"><span class="mk mk-infant"></span> Infant</div>
+        <div class="row"><span class="mk mk-elder"></span> Elder</div>
+        <div class="row"><span class="mk mk-sheep"></span> Sheep</div>
+      </div>
+
+      <div class="scalebar"><span class="bar"></span> 32 tiles · view 256×176 of 512×512</div>
+    </main>
+
+    <!-- ------------------------------------------------------ inspector -->
+    <aside class="panel right" id="inspector">
+      <div class="sec">
+        <div style="display:flex;align-items:baseline;gap:8px;margin-bottom:2px">
+          <h2 style="font-size:20px">Mira</h2>
+          <span class="chip alive"><span class="dot"></span>alive</span>
+        </div>
+        <div class="eyebrow" style="margin-bottom:10px">#412 · generation 4 · female</div>
+
+        <!-- SIGNATURE: the lifespan track -->
+        <div id="lifespan"></div>
+
+        <dl class="kv" style="margin-top:12px">
+          <dt>Age</dt><dd class="num">412 ticks <span class="dim">· 2.4 weeks</span></dd>
+          <dt>Expected</dt><dd class="num">631 <span class="dim">· 3 nights unsheltered</span></dd>
+          <dt>Position</dt><dd class="num">288, 164</dd>
+          <dt>Household</dt><dd><a href="#">Ottel's shelter</a> <span class="dim">· 5 members</span></dd>
+          <dt>Parents</dt><dd><a href="#">Ansa</a> <span class="still">†</span> · <a href="#">Rook</a></dd>
+          <dt>Children</dt><dd>2 living, 1 lost</dd>
+        </dl>
+      </div>
+
+      <div class="sec">
+        <div class="sec-head"><span class="eyebrow">Felt state</span><span class="dim" style="font-size:11px">tired, hungry</span></div>
+        <div class="needs" id="needs"></div>
+      </div>
+
+      <div class="sec">
+        <div class="sec-head">
+          <span class="eyebrow">Committed plan</span>
+          <span class="badge tier2">tier 2 · deep</span>
+        </div>
+        <div class="plan">
+          <ol class="plan-steps">
+            <li class="done"><span class="idx"></span><span>MOVE_TO 312,88</span><span class="cost">8t</span></li>
+            <li class="now"><span class="idx">▸</span><span>CHOP_WOOD node:4471</span><span class="cost">6t</span></li>
+            <li><span class="idx">3</span><span>MOVE_TO home</span><span class="cost">8t</span></li>
+          </ol>
+          <div class="horizon">
+            <span class="eyebrow">Horizon</span>
+            <div class="track"><div class="fill" style="width:41%"></div></div>
+            <span class="num" style="font-size:11px">13<span class="dim">/22</span></span>
+          </div>
+          <p class="rationale">“The near forage is picked over. Wood first, then home before dark.”</p>
+        </div>
+        <p style="font-size:11px;margin-top:9px">Set at tick 4,105 · cost 6 fatigue, 1.5 hunger. Aborts if hunger goes critical, the node empties, or a threat appears.</p>
+      </div>
+
+      <div class="sec">
+        <div class="sec-head"><span class="eyebrow">Beliefs</span><span class="dim" style="font-size:11px">14 held · 6 shown</span></div>
+        <div class="beliefs" id="beliefs"></div>
+      </div>
+
+      <div class="sec" style="border-bottom:0">
+        <div class="sec-head"><span class="eyebrow">Carrying</span></div>
+        <dl class="kv">
+          <dt>Grain</dt><dd class="num">4 <span class="dim">· keeps</span></dd>
+          <dt>Forage</dt><dd class="num">2 <span style="color:var(--st-serious)">· spoils in 9t</span></dd>
+          <dt>Firewood</dt><dd class="num">3 <span class="dim">· 1 night</span></dd>
+        </dl>
+        <div class="btn-row" style="margin-top:12px">
+          <a class="btn" href="creature.html" style="flex:1;text-align:center">Full record</a>
+          <a class="btn" href="knowledge.html" style="flex:1;text-align:center">Her map</a>
+        </div>
+      </div>
+    </aside>
+  </div>
+
+  <!-- ---------------------------------------------------------- ticker -->
+  <footer class="ticker">
+    <span class="ticker-label eyebrow">Events</span>
+    <div class="ticker-stream" id="ticker"></div>
+  </footer>
+</div>
+
+<script src="mock.js"></script>
+<script>
+  const sel = { x: 96, y: 84 };
+  const path = [[96,84],[104,80],[112,76],[120,72],[128,70]];
+
+  const $ = id => document.getElementById(id);
+  function paint() {
+    const byHousehold = $('o-household').checked;
+    drawMap($('map'), {
+      selected: sel, path,
+      nodes: $('o-nodes').checked,
+      creatures: $('o-creatures').checked,
+      byHousehold,
+      dimNodes: byHousehold      // resources step back when households take the palette
+    });
+    $('leg-living').textContent = byHousehold ? 'Moving · by household' : 'Moving';
+    document.querySelectorAll('.map-legend .mk:not(.mk-sheep)').forEach(m => {
+      m.style.background = byHousehold ? 'var(--c3)' : 'var(--quick)';
+    });
+  }
+  ['o-nodes', 'o-creatures', 'o-household'].forEach(id => $(id).addEventListener('change', paint));
+  window.__lzRepaint = paint;
+  document.addEventListener('palettechange', paint);
+  paint();
+  addEventListener('resize', paint);
+
+  document.getElementById('lifespan').innerHTML = lifespanHTML(412, false);
+
+  document.getElementById('needs').innerHTML =
+    need('Hunger', 34) + need('Thirst', 71) + need('Fatigue', 22) + need('Warmth', 58) + need('Health', 66);
+
+  const beliefs = [
+    { what: 'WATER · 284,150', src: 'You drank there yourself, recently.', conf: .96, meta: 'firsthand<br>18t ago' },
+    { what: 'WOOD · 312,88',   src: 'You chopped here two days ago.',       conf: .81, meta: 'firsthand<br>51t ago' },
+    { what: 'SOIL · 260,180',  src: 'Ottel showed you the patch.',          conf: .64, meta: '1 hop<br>96t ago' },
+    { what: 'FORAGE · 300,158',src: 'Picked over when you last looked.',    conf: .38, meta: 'firsthand<br>140t ago' },
+    { what: 'SHEEP · 340,120', src: 'Your cousin Sev mentioned a flock.',   conf: .27, meta: '2 hops<br>203t ago' },
+    { what: 'WOOD · 208,64',   src: 'Bren heard it from someone. Old.',     conf: .12, meta: '3 hops<br>388t ago' }
+  ];
+  document.getElementById('beliefs').innerHTML = beliefs.map(b => `
+    <div class="belief">
+      <span class="conf-bar" style="background:${confColor(b.conf)}"></span>
+      <div><div class="what">${b.what}</div><div class="src">${b.src}</div></div>
+      <div class="meta">${b.meta}</div>
+    </div>`).join('');
+
+  const evs = [
+    ['4118','Mira chopped wood at 312,88',''],
+    ['4118','Tolen deposited 6 grain to Ottel\'s store',''],
+    ['4117','Sev died of exposure, age 604','death'],
+    ['4117','Nara accepted Bren\'s courtship',''],
+    ['4116','Wren was born to Iska and Pell — generation 5','birth'],
+    ['4115','Halu abandoned a plan: forage node empty',''],
+    ['4114','Esk taught Wren 9 beliefs about water',''],
+    ['4113','2 forage spoiled in Vell\'s pack',''],
+    ['4112','Ansa lit a fire at 244,96',''],
+    ['4111','Rook slaughtered a sheep, shared 5 meat with 3 kin','']
+  ];
+  const html = evs.map(e => `<span class="ev ${e[2]}"><span class="t">${e[0]}</span>${e[1]}</span>`).join('');
+  document.getElementById('ticker').innerHTML = html + html;
+</script>
+</body>
+</html>

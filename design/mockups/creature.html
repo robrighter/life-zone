@@ -1,0 +1,293 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Record: Ansa — Life Zone</title>
+<link rel="stylesheet" href="app.css">
+<link rel="stylesheet" href="palettes.css">
+<script src="theme.js"></script>
+</head>
+<body>
+<div class="app">
+
+  <header class="topbar">
+    <span class="brand">Life Zone</span>
+    <nav class="nav">
+      <a href="index.html">Index</a>
+      <a href="world.html">World</a>
+      <a href="knowledge.html">Knowledge</a>
+      <a href="creature.html" aria-current="page">Record</a>
+      <a href="reports.html">Reports</a>
+      <a href="palettes.html">Palettes</a>
+    </nav>
+    <div class="topbar-right">
+      <div data-pal-switch></div>
+      <div class="readout"><span class="eyebrow">Record</span><span class="val">#288</span></div>
+      <div class="readout"><span class="eyebrow">Decisions</span><span class="val">61</span></div>
+      <div class="readout"><span class="eyebrow">Descendants</span><span class="val quick">23</span></div>
+    </div>
+  </header>
+
+  <div class="body" style="grid-template-columns: 340px 1fr;">
+
+    <!-- ------------------------------------------------------ left: who -->
+    <aside class="panel">
+      <div class="sec">
+        <div style="display:flex;align-items:baseline;gap:8px;margin-bottom:2px">
+          <h1 style="font-size:28px">Ansa</h1>
+          <span class="chip dead"><span class="dot"></span>died</span>
+        </div>
+        <div class="eyebrow" style="margin-bottom:12px">#288 · generation 3 · female</div>
+        <div id="lifespan"></div>
+        <p style="font-size:12px;margin-top:12px">
+          Died of old age at tick 3,702, aged <span class="num">658</span> — 14 short of the baseline.
+          She spent three nights unsheltered in her second week; each one cost her.
+        </p>
+        <dl class="kv" style="margin-top:12px">
+          <dt>Born</dt><dd class="num">tick 3,044</dd>
+          <dt>Died</dt><dd class="num">tick 3,702 <span class="dim">· old age</span></dd>
+          <dt>Lived</dt><dd class="num">658 ticks <span class="dim">· 3.9 weeks</span></dd>
+          <dt>Parents</dt><dd><a href="#">Tolen</a> <span class="still">†</span> · <a href="#">Iska</a> <span class="still">†</span></dd>
+          <dt>Mate</dt><dd><a href="#">Rook</a> <span class="still">†</span> <span class="dim">· paired tick 3,301</span></dd>
+          <dt>Children</dt><dd>4 born · 3 reached adulthood</dd>
+          <dt>Household</dt><dd>Founded her own at tick 3,318</dd>
+        </dl>
+      </div>
+
+      <div class="sec">
+        <div class="sec-head"><span class="eyebrow">Traits</span><span class="dim" style="font-size:11px">inherited + mutation</span></div>
+        <div class="needs">
+          <div class="need"><span class="lbl">Boldness</span><div class="track"><div class="fill" style="width:78%;background:var(--c2)"></div></div><span class="v">.78</span></div>
+          <div class="need"><span class="lbl">Industry</span><div class="track"><div class="fill" style="width:64%;background:var(--c2)"></div></div><span class="v">.64</span></div>
+          <div class="need"><span class="lbl">Sociability</span><div class="track"><div class="fill" style="width:81%;background:var(--c2)"></div></div><span class="v">.81</span></div>
+          <div class="need"><span class="lbl">Caution</span><div class="track"><div class="fill" style="width:29%;background:var(--c2)"></div></div><span class="v">.29</span></div>
+        </div>
+        <p style="font-size:11px;margin-top:10px">Bold and sociable, barely cautious. She committed long horizons and travelled far — which is why she found the eastern forage, and why she was caught out after dark three times.</p>
+      </div>
+
+      <div class="sec">
+        <div class="sec-head"><span class="eyebrow">What she left</span></div>
+        <dl class="kv">
+          <dt>Lineage</dt><dd class="num">3 generations below her <span class="dim">· 23 descendants</span></dd>
+          <dt>Living kin</dt><dd class="num">11</dd>
+          <dt>Beliefs found</dt><dd class="num">19 firsthand</dd>
+          <dt>Still circulating</dt><dd class="num quick">12 <span class="dim">of 19</span></dd>
+          <dt>Taught</dt><dd class="num">4 creatures <span class="dim">· 38 beliefs</span></dd>
+        </dl>
+        <p style="font-size:11px;margin-top:10px">Twelve of the nineteen places she discovered are still known to someone. The other seven died with the people she told.</p>
+      </div>
+
+      <div class="sec" style="border-bottom:0">
+        <div class="sec-head"><span class="eyebrow">Deliberation</span></div>
+        <dl class="kv">
+          <dt>LLM calls</dt><dd class="num">61 <span class="dim">over 658 ticks</span></dd>
+          <dt>Tier 1 falls</dt><dd class="num">412</dd>
+          <dt>Mean horizon</dt><dd class="num">14.2 <span class="dim">committed</span></dd>
+          <dt>Ran to end</dt><dd class="num">68%</dd>
+          <dt>Think fatigue</dt><dd class="num">284 <span class="dim">lifetime</span></dd>
+        </dl>
+      </div>
+    </aside>
+
+    <!-- ------------------------------------------------- right: the life -->
+    <main class="report-body">
+
+      <div class="section-rule"><h2>Her life</h2></div>
+      <div class="grid g2" style="align-items:start">
+        <div class="card">
+          <div class="timeline">
+            <div class="tl-item key"><div class="tl-t">TICK 3,044 · BORN</div>
+              <div class="tl-b">Born to <strong>Tolen</strong> and <strong>Iska</strong>, third of four. Household store held 31 grain.</div></div>
+            <div class="tl-item"><div class="tl-t">TICK 3,102 · TAUGHT</div>
+              <div class="tl-b"><strong>Iska</strong> taught her 14 beliefs over 6 ticks — water, the soil patch, and who to trust.</div></div>
+            <div class="tl-item key"><div class="tl-t">TICK 3,212 · CAME OF AGE</div>
+              <div class="tl-b">Left the household at 168 ticks. First plan of her own: explore east, horizon 22.</div></div>
+            <div class="tl-item"><div class="tl-t">TICK 3,244 · DISCOVERED</div>
+              <div class="tl-b">Found forage 41 tiles out. Told nobody for 86 ticks.</div></div>
+            <div class="tl-item"><div class="tl-t">TICK 3,258 · NEARLY DIED</div>
+              <div class="tl-b">Third night out with no fire. Warmth hit 4. Lost an estimated 31 ticks of life.</div></div>
+            <div class="tl-item key"><div class="tl-t">TICK 3,301 · PAIRED</div>
+              <div class="tl-b">Courted <strong>Rook</strong>. He accepted on the second offer.</div></div>
+            <div class="tl-item key"><div class="tl-t">TICK 3,318 · BUILT</div>
+              <div class="tl-b">Raised a shelter at 244,96 with 18 wood. Founded her household.</div></div>
+            <div class="tl-item"><div class="tl-t">TICK 3,366 · FIRST CHILD</div>
+              <div class="tl-b"><strong>Mira</strong> born. Store held 24 grain — four above the reserve.</div></div>
+            <div class="tl-item"><div class="tl-t">TICK 3,490 · LOST A CHILD</div>
+              <div class="tl-b">Third child starved at 40 ticks during the grain gap. She was 12 tiles away, chopping.</div></div>
+            <div class="tl-item"><div class="tl-t">TICK 3,512 · CHANGED</div>
+              <div class="tl-b">Planted wheat for the first time. Every plan after this one starts at the field.</div></div>
+            <div class="tl-item"><div class="tl-t">TICK 3,644 · TAUGHT ON</div>
+              <div class="tl-b">Taught <strong>Mira</strong> 11 beliefs, including the eastern forage.</div></div>
+            <div class="tl-item end"><div class="tl-t">TICK 3,702 · DIED</div>
+              <div class="tl-b">Old age, in the shelter she built. Store held 40 grain — the most it ever held.</div></div>
+          </div>
+        </div>
+
+        <div style="display:flex;flex-direction:column;gap:14px">
+          <div class="card">
+            <div class="chart-head"><span class="chart-title">Needs across her life</span></div>
+            <p class="chart-note">The grain gap at tick 3,470–3,510 is visible in hunger. It is also where she lost a child, and where she started farming.</p>
+            <div class="chart-scroll" id="needs-chart"></div>
+            <div class="legend">
+              <span class="item"><span class="sw" style="background:var(--c1)"></span>Hunger</span>
+              <span class="item"><span class="sw" style="background:var(--c5)"></span>Warmth</span>
+              <span class="item"><span class="sw" style="background:var(--c3)"></span>Health</span>
+            </div>
+          </div>
+
+          <div class="card">
+            <div class="chart-head"><span class="chart-title">What she spent her ticks on</span></div>
+            <p class="chart-note">Counted from executed plan steps, not from intentions. Farming only appears after tick 3,512.</p>
+            <div id="acts"></div>
+          </div>
+        </div>
+      </div>
+
+      <div class="section-rule"><h2>Every decision she made</h2></div>
+      <p class="chart-note" style="margin-bottom:14px">61 LLM calls over 658 ticks. Each one stores the full prompt, the raw response, and what actually became of the plan. This is what makes a death explainable.</p>
+
+      <details class="decision" open>
+        <summary>
+          <span class="num">3,512</span>
+          <span class="goal">PLANT_WHEAT → TEND_CROP → MOVE_TO home</span>
+          <span class="badge done">ran 19/19</span>
+          <span class="badge tier2">tier 2</span>
+        </summary>
+        <div class="decision-body">
+          <div class="eyebrow">Prompt sent to qwen3:8b</div>
+          <pre class="prompt"><span class="cm">— YOU —</span>
+You are <span class="hl">Ansa</span>, 2.8 weeks old, an adult in your prime.
+You are bold and very sociable, and you rarely hesitate.
+You are <span class="hl">hungry</span>. You are rested. You are warm enough.
+Your child died of hunger 22 ticks ago.
+
+<span class="cm">— AROUND YOU (15x15) —</span>
+. . . ~ ~ ~ . . . , , , . . .
+. . ~ ~ ~ ~ ~ . , , , , , . .
+. ~ ~ ~ ~ ~ . . , <span class="hl">s s s</span> , . .
+. ~ ~ ~ . . . . , <span class="hl">s s s</span> , . .
+. . . . . . @ . , <span class="hl">s s s</span> , . .
+. . . T T . . . . , , , . . .
+. . T T T T . . . . . . . . .
+
+<span class="cm">~ water   T forest   s soil   , grass   @ you</span>
+
+<span class="cm">— WHAT YOU KNOW —</span>
+Water, 6 steps west. You drank there this morning.
+Soil, 4 steps east, beside the water. You have never planted it.
+Wood, 14 steps south. You cut there three days ago.
+Forage, 41 steps east. You found it yourself, long ago — likely picked over.
+
+<span class="cm">— YOUR HOUSEHOLD —</span>
+Shelter at 244,96, sound. Rook, your mate. Mira, your daughter, 146 ticks.
+Store: 4 grain, 0 meat. The reserve for a child is 20.
+
+<span class="cm">— WHAT YOU MAY DO —</span>
+MOVE_TO, DRINK, EAT_FROM_STORE, GATHER_FORAGE, CHOP_WOOD,
+PLANT_WHEAT (soil at 4 steps), HERD_SHEEP, SHARE_KNOWLEDGE,
+TEACH (Mira), BUILD_FIRE, REST, EXPLORE
+
+Reply with a plan: steps, a horizon in ticks, and why.</pre>
+
+          <div class="eyebrow">Response</div>
+          <pre class="prompt">{
+  "steps": [
+    { "goal": "PLANT_WHEAT", "target": [248, 96], "est_ticks": 3 },
+    { "goal": "TEND_CROP",   "target": [248, 96], "est_ticks": 12 },
+    { "goal": "MOVE_TO",     "target": "home",    "est_ticks": 4 }
+  ],
+  "horizon": 19,
+  "abort_if": ["HUNGER_CRITICAL", "THREAT"],
+  "rationale": "Foraging did not keep my child alive. The soil is four steps
+                from water and I have never used it. Grain keeps; berries do not.
+                I will lose three days to this and I will be hungry for them."
+}</pre>
+          <dl class="kv" style="margin-top:12px">
+            <dt>Latency</dt><dd class="num">1,204 ms <span class="dim">· deep reasoning</span></dd>
+            <dt>Cost</dt><dd class="num">6 fatigue · 1.5 hunger</dd>
+            <dt>Age weight</dt><dd class="num">1.00 <span class="dim">· prime</span></dd>
+            <dt>Outcome</dt><dd class="num" style="color:var(--st-good)">Ran all 19 ticks. First harvest at 3,584.</dd>
+          </dl>
+        </div>
+      </details>
+
+      <details class="decision">
+        <summary>
+          <span class="num">3,486</span>
+          <span class="goal">GATHER_FORAGE → MOVE_TO home</span>
+          <span class="badge abort">aborted 4/16</span>
+          <span class="badge tier2">tier 2</span>
+        </summary>
+        <div class="decision-body">
+          <div class="eyebrow">What happened</div>
+          <p style="font-size:12px;margin-top:6px">Committed 16 ticks to a forage node she had not verified in 180 ticks. It was stripped. The plan aborted with <span class="num">TARGET_DEPLETED</span> after 4 ticks and she fell to tier 1, which sent her to the nearest known water instead. Her third child starved four ticks later.</p>
+          <dl class="kv" style="margin-top:12px">
+            <dt>Belief conf.</dt><dd class="num">0.24 <span class="dim">· 2 hops · 180 ticks stale</span></dd>
+            <dt>Cost</dt><dd class="num">4 fatigue · 1 hunger, for nothing</dd>
+          </dl>
+        </div>
+      </details>
+
+      <details class="decision">
+        <summary>
+          <span class="num">3,644</span>
+          <span class="goal">TEACH Mira</span>
+          <span class="badge done">ran 6/6</span>
+          <span class="badge tier2">tier 2</span>
+        </summary>
+        <div class="decision-body">
+          <div class="eyebrow">Rationale given</div>
+          <p class="rationale" style="border:0;margin:6px 0 0;padding:0">“I am old and she is not. I know eleven places she does not. Six ticks is cheap for that.”</p>
+          <p style="font-size:12px;margin-top:10px">Transferred 11 beliefs at hop 0. Four of them are still circulating 416 ticks after Ansa's death, held by creatures who never met her.</p>
+        </div>
+      </details>
+
+      <p style="font-size:11px;margin-top:6px" class="dim">58 more decisions · <a href="#">Export this life as CSV</a></p>
+    </main>
+  </div>
+</div>
+
+<script src="mock.js"></script>
+<script>
+  document.getElementById('lifespan').innerHTML = lifespanHTML(658, true, 658);
+
+  const ticks = [];
+  for (let i = 0; i <= 26; i++) ticks.push(3044 + i * 25);
+  const wobble = (base, amp, seed) => {
+    const r = rng(seed); return ticks.map((_, i) => Math.max(4, Math.round(base + Math.sin(i / 2.3) * amp + (r() - .5) * 14)));
+  };
+  const hunger = wobble(58, 20, 41);
+  hunger[17] = 12; hunger[18] = 8; hunger[19] = 14;   // the grain gap
+  const warmth = wobble(66, 16, 77);
+  warmth[8] = 9; warmth[9] = 22;
+  const health = wobble(74, 10, 12).map((v, i) => Math.max(20, v - Math.max(0, i - 20) * 5));
+
+  lineChart(document.getElementById('needs-chart'), {
+    title: 'Needs across her life',
+    width: 520, height: 190, maxY: 100,
+    x: ticks,
+    xTicks: [{i:0,l:'born'},{i:7,l:'adult'},{i:13,l:'3,370'},{i:19,l:'3,520'},{i:26,l:'died'}],
+    series: [
+      { name: 'Hunger', v: hunger, color: 'var(--c1)' },
+      { name: 'Warmth', v: warmth, color: 'var(--c5)' },
+      { name: 'Health', v: health, color: 'var(--c3)' }
+    ]
+  });
+
+  rankedBars(document.getElementById('acts'), {
+    title: 'Ticks by activity', suffix: 't', labelW: 104,
+    rows: [
+      { name: 'Moving',      v: 214, color: 'var(--c5)' },
+      { name: 'Gathering',   v: 118, color: 'var(--c4)' },
+      { name: 'Farming',     v: 96,  color: 'var(--c1)' },
+      { name: 'Resting',     v: 88,  color: 'var(--c6)' },
+      { name: 'Chopping',    v: 62,  color: 'var(--c6)' },
+      { name: 'With family', v: 44,  color: 'var(--c2)' },
+      { name: 'Teaching',    v: 18,  color: 'var(--c3)' },
+      { name: 'Exploring',   v: 18,  color: 'var(--c2)' }
+    ]
+  });
+</script>
+</body>
+</html>

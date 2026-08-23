@@ -1,0 +1,198 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Knowledge — Life Zone</title>
+<link rel="stylesheet" href="app.css">
+<link rel="stylesheet" href="palettes.css">
+<script src="theme.js"></script>
+</head>
+<body>
+<div class="app">
+
+  <header class="topbar">
+    <span class="brand">Life Zone</span>
+    <nav class="nav">
+      <a href="index.html">Index</a>
+      <a href="world.html">World</a>
+      <a href="knowledge.html" aria-current="page">Knowledge</a>
+      <a href="creature.html">Record</a>
+      <a href="reports.html">Reports</a>
+      <a href="palettes.html">Palettes</a>
+    </nav>
+    <div class="topbar-right">
+      <div data-pal-switch></div>
+      <div class="readout"><span class="eyebrow">Tick</span><span class="val">4,118</span></div>
+      <div class="readout"><span class="eyebrow">Known</span><span class="val quick" id="cov">31.4%</span></div>
+      <div class="readout"><span class="eyebrow">Oldest belief</span><span class="val">tick 402</span></div>
+    </div>
+  </header>
+
+  <div class="body" style="grid-template-columns: 244px 1fr 300px;">
+
+    <aside class="panel">
+      <div class="sec">
+        <div class="sec-head"><span class="eyebrow">Show the map as</span></div>
+        <div class="stack">
+          <button class="btn mode" id="m-self" aria-pressed="false"><span>Mira knows it</span><span class="sub">one creature · 14 beliefs</span></button>
+          <button class="btn mode" id="m-all" aria-pressed="true"><span>The community knows it</span><span class="sub">118 creatures · 743 beliefs</span></button>
+          <button class="btn mode" id="m-truth" aria-pressed="false"><span>It actually is</span><span class="sub">ground truth</span></button>
+        </div>
+        <p style="font-size:11px;margin-top:11px">Brightness is confidence. Dim ground is remembered but stale — someone has been there, but not lately, and it may have changed.</p>
+      </div>
+
+      <div class="sec">
+        <div class="sec-head"><span class="eyebrow">Confidence</span></div>
+        <div style="display:flex;height:9px;border-radius:1px;overflow:hidden;margin-bottom:6px">
+          <span style="flex:1;background:var(--seq-1)"></span>
+          <span style="flex:1;background:var(--seq-2)"></span>
+          <span style="flex:1;background:var(--seq-3)"></span>
+          <span style="flex:1;background:var(--seq-4)"></span>
+          <span style="flex:1;background:var(--seq-5)"></span>
+        </div>
+        <div style="display:flex;justify-content:space-between" class="eyebrow">
+          <span>hearsay</span><span>firsthand</span>
+        </div>
+      </div>
+
+      <div class="sec">
+        <div class="sec-head"><span class="eyebrow">Filter by kind</span></div>
+        <label class="toggle"><input type="checkbox" checked> Water <span class="swatch" style="background:var(--t-shallow)"></span></label>
+        <label class="toggle"><input type="checkbox" checked> Wood <span class="swatch" style="background:var(--res-wood)"></span></label>
+        <label class="toggle"><input type="checkbox" checked> Soil <span class="swatch" style="background:var(--res-wheat)"></span></label>
+        <label class="toggle"><input type="checkbox" checked> Forage <span class="swatch" style="background:var(--res-forage)"></span></label>
+        <label class="toggle"><input type="checkbox" checked> Sheep <span class="swatch" style="background:#E6ECEA"></span></label>
+        <label class="toggle"><input type="checkbox"> People</label>
+      </div>
+
+      <div class="sec" style="border-bottom:0">
+        <div class="sec-head"><span class="eyebrow">Coverage by generation</span></div>
+        <div id="cov-chart"></div>
+        <p style="font-size:11px;margin-top:9px">Coverage fell in generation 3 when Tolen died at 240 ticks without teaching. Four water sources left circulation with him and were rediscovered two generations later.</p>
+      </div>
+    </aside>
+
+    <main class="map-wrap">
+      <canvas id="kmap"></canvas>
+      <div class="map-legend">
+        <div class="row"><span class="sw" style="background:var(--seq-5)"></span> Verified recently</div>
+        <div class="row"><span class="sw" style="background:var(--seq-3)"></span> Secondhand</div>
+        <div class="row"><span class="sw" style="background:var(--seq-1)"></span> Stale, may be wrong</div>
+        <div class="row"><span class="sw" style="background:var(--void);border:1px solid var(--line)"></span> Never seen</div>
+      </div>
+      <div class="scalebar"><span class="bar"></span> 32 tiles</div>
+    </main>
+
+    <aside class="panel right">
+      <div class="sec">
+        <div class="sec-head"><span class="eyebrow">Belief</span><span class="badge abort">stale</span></div>
+        <h2 style="font-size:16px;margin-bottom:2px">Forage at 300,158</h2>
+        <p style="font-size:12px;margin-bottom:12px">Held by 7 creatures across 3 households. Nobody has verified it in 140 ticks. Two creatures have walked there and found it empty; neither told anyone.</p>
+        <dl class="kv">
+          <dt>Discovered</dt><dd>tick 3,244 by <a href="#">Ansa</a> <span class="still">†</span></dd>
+          <dt>Origin gen</dt><dd class="num">3</dd>
+          <dt>Max hops</dt><dd class="num">3</dd>
+          <dt>Best conf.</dt><dd class="num">0.38</dd>
+        </dl>
+      </div>
+
+      <div class="sec">
+        <div class="sec-head"><span class="eyebrow">Chain of telling</span></div>
+        <div class="timeline">
+          <div class="tl-item key">
+            <div class="tl-t">TICK 3,244 · FIRSTHAND</div>
+            <div class="tl-b"><strong>Ansa</strong> found it while exploring, 41 tiles from home.</div>
+          </div>
+          <div class="tl-item">
+            <div class="tl-t">TICK 3,290 · TAUGHT</div>
+            <div class="tl-b"><strong>Ansa</strong> taught <strong>Mira</strong>, her daughter, along with 11 other beliefs.</div>
+          </div>
+          <div class="tl-item">
+            <div class="tl-t">TICK 3,644 · SHARED</div>
+            <div class="tl-b"><strong>Mira</strong> told <strong>Sev</strong> and <strong>Bren</strong> at the water's edge.</div>
+          </div>
+          <div class="tl-item end">
+            <div class="tl-t">TICK 3,702 · DISCOVERER DIED</div>
+            <div class="tl-b"><strong>Ansa</strong> died of old age. The belief outlived her by 416 ticks so far.</div>
+          </div>
+          <div class="tl-item">
+            <div class="tl-t">TICK 3,978 · SHARED ON</div>
+            <div class="tl-b"><strong>Bren</strong> passed it to 4 more. Confidence is now 0.38 and falling.</div>
+          </div>
+        </div>
+      </div>
+
+      <div class="sec" style="border-bottom:0">
+        <div class="sec-head"><span class="eyebrow">Who holds it</span></div>
+        <table class="data">
+          <thead><tr><th>Creature</th><th class="n">Hops</th><th class="n">Conf</th></tr></thead>
+          <tbody>
+            <tr><td class="name">Mira</td><td class="n">1</td><td class="n">0.38</td></tr>
+            <tr><td class="name">Sev <span class="still">†</span></td><td class="n">2</td><td class="n">0.31</td></tr>
+            <tr><td class="name">Bren</td><td class="n">2</td><td class="n">0.30</td></tr>
+            <tr><td class="name">Nara</td><td class="n">3</td><td class="n">0.22</td></tr>
+            <tr><td class="name">Wren</td><td class="n">3</td><td class="n">0.19</td></tr>
+            <tr><td class="name">Halu</td><td class="n">3</td><td class="n">0.19</td></tr>
+            <tr><td class="name">Esk</td><td class="n">3</td><td class="n">0.17</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </aside>
+  </div>
+
+  <footer class="ticker">
+    <span class="ticker-label eyebrow">Knowledge</span>
+    <div class="ticker-stream">
+      <span class="ev"><span class="t">4118</span>Esk taught Wren 9 beliefs — 4 about water, 3 about wood, 2 about people</span>
+      <span class="ev"><span class="t">4116</span>Nara verified soil at 260,180 — confidence restored to 1.00</span>
+      <span class="ev"><span class="t">4114</span>Halu walked to a forage node that was stripped 90 ticks ago</span>
+      <span class="ev death"><span class="t">4117</span>Sev died holding 22 beliefs. 14 were held by nobody else</span>
+      <span class="ev"><span class="t">4111</span>Rook shared 3 beliefs with a stranger from another household</span>
+    </div>
+  </footer>
+</div>
+
+<script src="mock.js"></script>
+<script>
+  let mode = 'all';
+  const canvas = document.getElementById('kmap');
+  const fields = { self: knowledgeField(SITES_SELF), all: knowledgeField(SITES_ALL) };
+
+  function paint() {
+    const opts = { creatures: mode !== 'self' };
+    if (mode !== 'truth') opts.knowledge = fields[mode];
+    if (mode === 'self') opts.selected = { x: 96, y: 84 };
+    drawMap(canvas, opts);
+    const cov = mode === 'truth' ? 100 :
+      (fields[mode].reduce((a, v) => a + (v > .08 ? 1 : 0), 0) / fields[mode].length * 100);
+    document.getElementById('cov').textContent = cov.toFixed(1) + '%';
+  }
+
+  const buttons = { self: 'm-self', all: 'm-all', truth: 'm-truth' };
+  Object.entries(buttons).forEach(([k, id]) => {
+    document.getElementById(id).addEventListener('click', () => {
+      mode = k;
+      Object.entries(buttons).forEach(([k2, id2]) =>
+        document.getElementById(id2).setAttribute('aria-pressed', String(k2 === k)));
+      paint();
+    });
+  });
+
+  window.__lzRepaint = paint;
+  document.addEventListener('palettechange', paint);
+  paint();
+  addEventListener('resize', paint);
+
+  lineChart(document.getElementById('cov-chart'), {
+    title: 'Collective map coverage by generation',
+    width: 210, height: 96,
+    x: [1, 2, 3, 4, 5, 6],
+    xTicks: [{i:0,l:'g1'},{i:1,l:'g2'},{i:2,l:'g3'},{i:3,l:'g4'},{i:4,l:'g5'},{i:5,l:'g6'}],
+    maxY: 40, unit: '%',
+    directLabel: false,
+    series: [{ name: 'Coverage', v: [6, 14, 11, 19, 27, 31], color: 'var(--c1)', area: true }]
+  });
+</script>
+</body>
+</html>

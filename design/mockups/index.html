@@ -1,0 +1,144 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Life Zone — design mockups</title>
+<link rel="stylesheet" href="app.css">
+<link rel="stylesheet" href="palettes.css">
+<script src="theme.js"></script>
+</head>
+<body>
+<div class="index-wrap">
+
+  <header class="index-hero">
+    <span class="eyebrow">Design mockups · draft 1 · 23 Aug 2026</span>
+    <h1 style="margin-top:14px">An instrument for<br>watching things die well</h1>
+    <p class="lede">
+      Life Zone is not a god game and not a colony sim. Nobody gives orders. You build a world,
+      set the rules, and read the record — so the interface is built for reading a record, not
+      commanding an army.
+    </p>
+  </header>
+
+  <div class="grid g2" style="gap:26px;align-items:start">
+    <div>
+      <span class="eyebrow">The direction</span>
+      <p style="margin-top:10px">
+        Two colours carry the whole product: <span class="quick">lamplight amber for the quick</span>
+        and <span class="still">cold bone for the still</span>. Every creature is one or the other,
+        and a database of 1,161 lives is mostly the second. That opposition replaces the usual
+        brand accent.
+      </p>
+      <p>
+        Labels are set in monospace throughout, the way lab equipment is labelled — everything here
+        is a tick, an ID, a coordinate, or a confidence. Prose is reserved for the two places the
+        simulation actually speaks: a creature's stated reasoning, and the story of a life.
+      </p>
+    </div>
+    <div>
+      <span class="eyebrow">The signature</span>
+      <p style="margin-top:10px">
+        A <strong style="color:var(--ink)">672-tick lifespan track</strong> appears wherever a creature is
+        named. Zones mark infant, adult and elder; the bar is how much life has been spent; the mark
+        is now, or — in bone — where a life actually ended against the baseline it was owed.
+      </p>
+      <div style="max-width:280px;margin-top:16px">
+        <div class="eyebrow" style="margin-bottom:5px">Mira · alive · 412 ticks</div>
+        <div id="ls-alive"></div>
+        <div class="eyebrow" style="margin:16px 0 5px">Ansa · died at 658 of 672</div>
+        <div id="ls-dead"></div>
+        <div class="eyebrow" style="margin:16px 0 5px">Wren · starved at 40, still an infant</div>
+        <div id="ls-infant"></div>
+      </div>
+    </div>
+  </div>
+
+  <div class="section-rule" style="margin-top:40px"><span class="eyebrow">Screens</span></div>
+  <div class="screens">
+    <a class="screen-card" href="world.html">
+      <span class="eyebrow">01 · the live view</span>
+      <h2>World</h2>
+      <p>The map, the speed modes, the deliberation budget, and the inspector. Shows a creature's
+         committed plan with the reasoning it gave, and the beliefs it is acting on.</p>
+    </a>
+    <a class="screen-card" href="knowledge.html">
+      <span class="eyebrow">02 · the argument</span>
+      <h2>Knowledge</h2>
+      <p>The map as <em>known</em> rather than as it is. Toggle between one creature's beliefs and the
+         community's. Brightness is confidence; the dark is everything nobody has been to.</p>
+    </a>
+    <a class="screen-card" href="creature.html">
+      <span class="eyebrow">03 · the record</span>
+      <h2>A life</h2>
+      <p>Ansa, dead at 658 ticks. Her timeline, her needs, every LLM call she made with the full
+         prompt, and what became of each plan. This is what makes a death explainable.</p>
+    </a>
+    <a class="screen-card" href="reports.html">
+      <span class="eyebrow">04 · the evidence</span>
+      <h2>Reports</h2>
+      <p>Population, lineage, culture, economy, and whether the model is earning its keep. Built to
+         answer the success criteria directly rather than to look busy.</p>
+    </a>
+  </div>
+
+  <div class="section-rule" style="margin-top:40px"><span class="eyebrow">Palette</span></div>
+  <p style="max-width:62ch">The six categorical hues are validated against the chart surface — lightness band,
+     chroma floor, colourblind separation, and contrast all pass. They are assigned in fixed order and never cycled.</p>
+  <p style="max-width:62ch">There are <a href="palettes.html"><strong>three palettes to choose between</strong></a> —
+     Unlit, Survey and Strata. Every screen carries a switcher in its header, so you can walk the whole
+     app in one and judge it in place rather than from swatches. The tokens below follow whichever is active.</p>
+  <div data-pal-switch style="margin:14px 0 18px"></div>
+  <div class="tokens">
+    <div class="token"><div class="sw" style="background:var(--c1)"></div><div class="nm">slot 1</div></div>
+    <div class="token"><div class="sw" style="background:var(--c2)"></div><div class="nm">slot 2</div></div>
+    <div class="token"><div class="sw" style="background:var(--c3)"></div><div class="nm">slot 3</div></div>
+    <div class="token"><div class="sw" style="background:var(--c4)"></div><div class="nm">slot 4</div></div>
+    <div class="token"><div class="sw" style="background:var(--c5)"></div><div class="nm">slot 5</div></div>
+    <div class="token"><div class="sw" style="background:var(--c6)"></div><div class="nm">slot 6</div></div>
+  </div>
+  <div class="tokens" style="margin-top:14px">
+    <div class="token"><div class="sw" style="background:var(--quick)"></div><div class="nm">quick · alive</div></div>
+    <div class="token"><div class="sw" style="background:var(--still)"></div><div class="nm">still · dead</div></div>
+    <div class="token"><div class="sw" style="background:var(--void)"></div><div class="nm">void</div></div>
+    <div class="token"><div class="sw" style="background:var(--surface)"></div><div class="nm">surface</div></div>
+    <div class="token"><div class="sw" style="background:var(--panel)"></div><div class="nm">panel</div></div>
+    <div class="token"><div class="sw" style="background:var(--raised)"></div><div class="nm">raised</div></div>
+  </div>
+  <p style="margin-top:14px;font-size:12px" class="dim">
+    Confidence uses a single-hue sequential ramp — hearsay to firsthand — kept deliberately separate
+    from the categorical set so a faded belief never reads as a category.
+  </p>
+  <div class="tokens" style="margin-top:10px">
+    <div class="token"><div class="sw" style="background:var(--seq-1);height:26px"></div><div class="nm">0.0–0.2</div></div>
+    <div class="token"><div class="sw" style="background:var(--seq-2);height:26px"></div><div class="nm">0.2–0.4</div></div>
+    <div class="token"><div class="sw" style="background:var(--seq-3);height:26px"></div><div class="nm">0.4–0.6</div></div>
+    <div class="token"><div class="sw" style="background:var(--seq-4);height:26px"></div><div class="nm">0.6–0.8</div></div>
+    <div class="token"><div class="sw" style="background:var(--seq-5);height:26px"></div><div class="nm">0.8–1.0</div></div>
+  </div>
+
+  <div class="section-rule" style="margin-top:40px"><span class="eyebrow">Open for discussion</span></div>
+  <ol style="max-width:66ch;color:var(--ink-2);font-size:13px;padding-left:20px">
+    <li style="margin-bottom:9px"><strong style="color:var(--ink)">Three panels may be one too many.</strong>
+      The world view runs rail / map / inspector. On a 13" screen the map gets squeezed. The inspector
+      could slide over the map instead of sitting beside it.</li>
+    <li style="margin-bottom:9px"><strong style="color:var(--ink)">Where does the knowledge overlay live?</strong>
+      It is mocked as its own screen, but it may work better as an overlay mode on the world view —
+      one toggle rather than a separate destination.</li>
+    <li style="margin-bottom:9px"><strong style="color:var(--ink)">How much prompt to show inline.</strong>
+      The record screen shows full prompts. That is right for debugging and probably too much for
+      reading a life. It might want to collapse by default.</li>
+    <li style="margin-bottom:9px"><strong style="color:var(--ink)">The map is a placeholder.</strong>
+      Creatures are dots sized by life stage and coloured by household. At 500 creatures on a 512×512
+      map that may read as noise — worth testing before committing to it.</li>
+  </ol>
+</div>
+
+<script src="mock.js"></script>
+<script>
+  document.getElementById('ls-alive').innerHTML = lifespanHTML(412, false);
+  document.getElementById('ls-dead').innerHTML = lifespanHTML(658, true, 658);
+  document.getElementById('ls-infant').innerHTML = lifespanHTML(40, true, 40);
+</script>
+</body>
+</html>

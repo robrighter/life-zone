@@ -1,0 +1,10 @@
+# This repo moves between WSL and Windows. Normalise line endings in the index
+# so a checkout on either side doesn't show the whole tree as modified.
+* text=auto eol=lf
+
+# Binary assets, if any get added later
+*.png binary
+*.jpg binary
+*.woff2 binary
+*.db binary
+*.sqlite binary

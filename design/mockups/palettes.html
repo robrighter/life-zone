@@ -1,0 +1,193 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Palettes — Life Zone</title>
+<link rel="stylesheet" href="app.css">
+<link rel="stylesheet" href="palettes.css">
+<style>
+  /* Each specimen renders in its own palette regardless of the page theme, so
+     all three can be compared at once. Scoped overrides, same tokens. */
+  .spec { border: 1px solid var(--line); border-radius: var(--r); overflow: hidden; }
+  .spec-head { padding: 14px 16px; border-bottom: 1px solid var(--line); }
+  .spec-head h2 { font-size: 18px; margin-bottom: 3px; }
+  .spec-head .eyebrow { display: block; margin-bottom: 7px; }
+  .spec-head p { font-size: 12px; margin: 0; }
+  .spec-body { padding: 16px; }
+  .spec canvas { width: 100%; height: 148px; display: block; border-radius: 2px; }
+  .ramp { display: flex; height: 22px; border-radius: 2px; overflow: hidden; }
+  .ramp span { flex: 1; }
+  .duo { display: flex; gap: 8px; }
+  .duo div { flex: 1; padding: 9px 10px; border-radius: 2px; font-family: var(--mono); font-size: 10px; letter-spacing: .06em; text-transform: uppercase; }
+  .cat { display: flex; gap: 4px; }
+  .cat span { flex: 1; height: 26px; border-radius: 2px; }
+  .lbl-row { display: flex; justify-content: space-between; font-family: var(--mono); font-size: 9px; letter-spacing: .09em; text-transform: uppercase; color: var(--ink-3); margin: 6px 0 4px; }
+  .verdict { font-size: 12px; padding: 11px 16px; border-top: 1px solid var(--line); }
+  .verdict b { color: var(--ink); font-weight: 500; }
+  @media (max-width: 980px) { .three { grid-template-columns: 1fr !important; } }
+</style>
+</head>
+<body>
+<div class="index-wrap" style="max-width:1280px">
+
+  <header class="index-hero">
+    <span class="eyebrow">Design mockups · palette options</span>
+    <h1 style="margin-top:14px">Three ways to<br>colour a graveyard</h1>
+    <p class="lede">
+      All three carry the same idea — one colour for the quick, one for the still, and a validated
+      six-hue categorical set that never doubles as anything else. They disagree about what kind of
+      document this is. Switch any screen between them from the palette control in its header.
+    </p>
+    <div style="display:flex;gap:8px;margin-top:20px;flex-wrap:wrap">
+      <a class="btn" href="world.html">Open World →</a>
+      <a class="btn" href="knowledge.html">Open Knowledge →</a>
+      <a class="btn" href="reports.html">Open Reports →</a>
+      <a class="btn" href="index.html">Back to index</a>
+    </div>
+  </header>
+
+  <div class="grid three" style="grid-template-columns:repeat(3,1fr);gap:16px;align-items:start">
+
+    <!-- A -------------------------------------------------------------- -->
+    <div class="spec">
+      <div class="spec-head">
+        <span class="eyebrow">A · current</span>
+        <h2>Unlit</h2>
+        <p>Deep unlit water. Lamplight amber for the living, cold bone for the dead. Reads as
+           telemetry — a console you watch at night.</p>
+      </div>
+      <div class="spec-body">
+        <canvas data-pal-canvas="unlit"></canvas>
+        <div class="lbl-row"><span>quick / still</span></div>
+        <div class="duo">
+          <div style="background:#F0A93C;color:#0A1012">alive</div>
+          <div style="background:#9C9AA6;color:#0A1012">dead</div>
+        </div>
+        <div class="lbl-row"><span>categorical</span><span>validated</span></div>
+        <div class="cat">
+          <span style="background:#c38414"></span><span style="background:#875aab"></span>
+          <span style="background:#41a984"></span><span style="background:#b34941"></span>
+          <span style="background:#5b7ec8"></span><span style="background:#77954d"></span>
+        </div>
+        <div class="lbl-row"><span>confidence</span><span>hearsay → firsthand</span></div>
+        <div class="ramp">
+          <span style="background:#2A2415"></span><span style="background:#4E3D14"></span>
+          <span style="background:#7A5C12"></span><span style="background:#A87D10"></span>
+          <span style="background:#D9A62A"></span>
+        </div>
+      </div>
+      <div class="verdict">
+        <b>Strongest map.</b> The unknown is genuinely black, so the knowledge overlay has the most
+        dramatic range of the three. <b>Weakest for long reading</b> — the record screen is a lot of
+        small text on a dark ground.
+      </div>
+    </div>
+
+    <!-- B -------------------------------------------------------------- -->
+    <div class="spec">
+      <div class="spec-head">
+        <span class="eyebrow">B · new</span>
+        <h2>Survey</h2>
+        <p>A field survey office. Cool paper, bottle green for the living, pencil grey for the dead.
+           Reads as a document you file, not a console you watch.</p>
+      </div>
+      <div class="spec-body">
+        <canvas data-pal-canvas="survey"></canvas>
+        <div class="lbl-row"><span>quick / still</span></div>
+        <div class="duo">
+          <div style="background:#005E3E;color:#EDEFEC">alive</div>
+          <div style="background:#93A0A4;color:#16211F">dead</div>
+        </div>
+        <div class="lbl-row"><span>categorical</span><span>validated</span></div>
+        <div class="cat">
+          <span style="background:#af3e30"></span><span style="background:#2459a5"></span>
+          <span style="background:#9d7000"></span><span style="background:#008668"></span>
+          <span style="background:#85356e"></span><span style="background:#718b42"></span>
+        </div>
+        <div class="lbl-row"><span>confidence</span><span>hearsay → firsthand</span></div>
+        <div class="ramp">
+          <span style="background:#D3D9D8"></span><span style="background:#B2BFBE"></span>
+          <span style="background:#8AA0A2"></span><span style="background:#5B7C84"></span>
+          <span style="background:#2B5461"></span>
+        </div>
+      </div>
+      <div class="verdict">
+        <b>The unknown becomes unprinted paper</b> — which is exactly what an incomplete real map
+        looks like, and arguably the truer metaphor. <b>Best for reading</b> prompts and life stories.
+        Green against pencil grey reads as <b>living versus withered</b> — a more literal claim than
+        amber-versus-bone, and a faster one.
+      </div>
+    </div>
+
+    <!-- C -------------------------------------------------------------- -->
+    <div class="spec">
+      <div class="spec-head">
+        <span class="eyebrow">C · new</span>
+        <h2>Strata</h2>
+        <p>An excavation section. Warm umber ground, ember for the living, chalk for the dead.
+           Older and slower — generations stacking like sediment.</p>
+      </div>
+      <div class="spec-body">
+        <canvas data-pal-canvas="strata"></canvas>
+        <div class="lbl-row"><span>quick / still</span></div>
+        <div class="duo">
+          <div style="background:#E8823A;color:#120E0B">alive</div>
+          <div style="background:#B9AFA0;color:#120E0B">dead</div>
+        </div>
+        <div class="lbl-row"><span>categorical</span><span>validated</span></div>
+        <div class="cat">
+          <span style="background:#bf890d"></span><span style="background:#4370b2"></span>
+          <span style="background:#339d89"></span><span style="background:#b14533"></span>
+          <span style="background:#a19341"></span><span style="background:#9d538a"></span>
+        </div>
+        <div class="lbl-row"><span>confidence</span><span>hearsay → firsthand</span></div>
+        <div class="ramp">
+          <span style="background:#2A1F15"></span><span style="background:#4C3618"></span>
+          <span style="background:#77531A"></span><span style="background:#A3741B"></span>
+          <span style="background:#D19A2E"></span>
+        </div>
+      </div>
+      <div class="verdict">
+        <b>Warmest and most particular.</b> Umber ground suits a register of the dead better than
+        cold teal does. <b>Riskiest</b>: water has to stay blue to read as water, and blue on umber
+        is the one combination here that fights itself.
+      </div>
+    </div>
+  </div>
+
+  <div class="section-rule" style="margin-top:36px"><span class="eyebrow">Where they actually differ</span></div>
+  <table class="data" style="max-width:920px">
+    <thead><tr><th>&nbsp;</th><th>Unlit</th><th>Survey</th><th>Strata</th></tr></thead>
+    <tbody>
+      <tr><td class="name">What the unknown looks like</td><td>Black</td><td>Blank paper</td><td>Dark earth</td></tr>
+      <tr><td class="name">Colour of the living</td><td>Lamplight amber</td><td>Bottle green</td><td>Ember orange</td></tr>
+      <tr><td class="name">Colour of the dead</td><td>Cold bone</td><td>Pencil grey</td><td>Chalk</td></tr>
+      <tr><td class="name">Best screen</td><td>Knowledge</td><td>A life</td><td>Reports</td></tr>
+      <tr><td class="name">Worst screen</td><td>A life</td><td>Knowledge</td><td>World</td></tr>
+      <tr><td class="name">Reads as</td><td>A console</td><td>An archive</td><td>A section drawing</td></tr>
+      <tr><td class="name">Palette checks</td><td>All pass</td><td>All pass</td><td>All pass</td></tr>
+    </tbody>
+  </table>
+
+  <p style="max-width:66ch;margin-top:20px;font-size:13px">
+    My preference is still <b style="color:var(--ink)">Unlit</b>, on one argument: the knowledge overlay
+    is the most distinctive thing this product does, and it needs a genuinely dark unknown to have any
+    range. Survey is the better document and the worse instrument. Strata is the most characterful and
+    the least legible on the one screen you will look at most.
+  </p>
+</div>
+
+<script src="mock.js"></script>
+<script src="theme.js"></script>
+<script>
+  /* draw each specimen map in its own palette, then restore the page's */
+  const keep = PAL;
+  document.querySelectorAll('[data-pal-canvas]').forEach(c => {
+    setTerrainPalette(c.dataset.palCanvas);
+    drawMap(c, { selected: { x: 96, y: 84 } });
+  });
+  setTerrainPalette(keep);
+</script>
+</body>
+</html>

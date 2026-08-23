@@ -1,0 +1,441 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Reports — Life Zone</title>
+<link rel="stylesheet" href="app.css">
+<link rel="stylesheet" href="palettes.css">
+<script src="theme.js"></script>
+</head>
+<body>
+<div class="app">
+
+  <header class="topbar">
+    <span class="brand">Life Zone</span>
+    <nav class="nav">
+      <a href="index.html">Index</a>
+      <a href="world.html">World</a>
+      <a href="knowledge.html">Knowledge</a>
+      <a href="creature.html">Record</a>
+      <a href="reports.html" aria-current="page">Reports</a>
+      <a href="palettes.html">Palettes</a>
+    </nav>
+    <div class="topbar-right">
+      <div data-pal-switch></div>
+      <div class="readout"><span class="eyebrow">World</span><span class="val">Ashfen · 44127</span></div>
+      <div class="readout"><span class="eyebrow">Through tick</span><span class="val">4,118</span></div>
+      <button class="btn">Export all CSV</button>
+    </div>
+  </header>
+
+  <div class="body" style="grid-template-columns:1fr">
+    <main class="report-body">
+
+      <div class="report-head">
+        <h1>Ashfen, 172 days in</h1>
+        <p>1,161 creatures have lived here. 118 are alive now. The deepest bloodline is six generations
+           and runs through Ottel, who has been dead for 900 ticks.</p>
+      </div>
+
+      <!-- headline tiles ------------------------------------------------ -->
+      <div class="grid g4">
+        <div class="card stat">
+          <div class="eyebrow">Deepest lineage</div>
+          <div class="big quick">6</div>
+          <div class="sub">generations · Ottel's line, 34 descendants</div>
+        </div>
+        <div class="card stat">
+          <div class="eyebrow">Median life</div>
+          <div class="big">417</div>
+          <div class="sub">ticks, against a 672 baseline — 62%</div>
+        </div>
+        <div class="card stat">
+          <div class="eyebrow">Infant mortality</div>
+          <div class="big" style="color:var(--st-serious)">31%</div>
+          <div class="sub">down from 58% in generation 2</div>
+        </div>
+        <div class="card stat">
+          <div class="eyebrow">Beliefs outliving finders</div>
+          <div class="big" style="color:var(--c3)">44%</div>
+          <div class="sub">S7 target is a measurable share · passing</div>
+        </div>
+      </div>
+
+      <!-- population ---------------------------------------------------- -->
+      <div class="section-rule"><h2>Population &amp; survival</h2></div>
+      <div class="grid g2">
+        <div class="card">
+          <div class="chart-head"><span class="chart-title">Population, births and deaths</span></div>
+          <p class="chart-note">The crash at tick 1,900 is the second-generation grain gap: households reproduced before they could store food, then could not feed the infants.</p>
+          <div class="chart-scroll" id="pop"></div>
+          <div class="legend">
+            <span class="item"><span class="sw" style="background:var(--c1)"></span>Alive</span>
+            <span class="item"><span class="sw" style="background:var(--c3)"></span>Births per 100 ticks</span>
+            <span class="item"><span class="sw" style="background:var(--c4)"></span>Deaths per 100 ticks</span>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="chart-head"><span class="chart-title">Cause of death by generation</span></div>
+          <p class="chart-note">Starvation gives way to old age as farming spreads. That shift is the clearest evidence the community is learning something across generations.</p>
+          <div class="chart-scroll" id="cod"></div>
+          <div class="legend">
+            <span class="item"><span class="sw" style="background:var(--c1)"></span>Starvation</span>
+            <span class="item"><span class="sw" style="background:var(--c2)"></span>Exposure</span>
+            <span class="item"><span class="sw" style="background:var(--c3)"></span>Old age</span>
+            <span class="item"><span class="sw" style="background:var(--c4)"></span>Dehydration</span>
+            <span class="item"><span class="sw" style="background:var(--c5)"></span>Childbirth</span>
+            <span class="item"><span class="sw" style="background:var(--c6)"></span>Accident</span>
+          </div>
+          <details class="table-view">
+            <summary>Table view</summary>
+            <table class="data">
+              <thead><tr><th>Gen</th><th class="n">Starv.</th><th class="n">Expo.</th><th class="n">Old age</th><th class="n">Dehyd.</th><th class="n">Birth</th><th class="n">Acc.</th></tr></thead>
+              <tbody>
+                <tr><td class="name">1</td><td class="n">42</td><td class="n">31</td><td class="n">9</td><td class="n">14</td><td class="n">3</td><td class="n">5</td></tr>
+                <tr><td class="name">2</td><td class="n">118</td><td class="n">44</td><td class="n">18</td><td class="n">21</td><td class="n">9</td><td class="n">8</td></tr>
+                <tr><td class="name">3</td><td class="n">96</td><td class="n">38</td><td class="n">51</td><td class="n">12</td><td class="n">14</td><td class="n">11</td></tr>
+                <tr><td class="name">4</td><td class="n">61</td><td class="n">29</td><td class="n">88</td><td class="n">8</td><td class="n">16</td><td class="n">9</td></tr>
+                <tr><td class="name">5</td><td class="n">38</td><td class="n">22</td><td class="n">104</td><td class="n">5</td><td class="n">12</td><td class="n">7</td></tr>
+                <tr><td class="name">6</td><td class="n">14</td><td class="n">9</td><td class="n">41</td><td class="n">2</td><td class="n">5</td><td class="n">3</td></tr>
+              </tbody>
+            </table>
+          </details>
+        </div>
+
+        <div class="card">
+          <div class="chart-head"><span class="chart-title">Age at death</span></div>
+          <p class="chart-note">Two populations, not one: infants who never made it out of dependency, and adults who did. Almost nobody dies in between.</p>
+          <div class="chart-scroll" id="aad"></div>
+        </div>
+
+        <div class="card">
+          <div class="chart-head"><span class="chart-title">Deepest bloodlines</span></div>
+          <p class="chart-note">Of the eight founders, three still have living descendants. Four lines ended in generation 2.</p>
+          <div id="lineage"></div>
+        </div>
+      </div>
+
+      <!-- knowledge ----------------------------------------------------- -->
+      <div class="section-rule"><h2>Knowledge &amp; culture</h2></div>
+      <div class="grid g2">
+        <div class="card span2">
+          <div class="chart-head"><span class="chart-title">Does knowledge outlive the people who found it?</span></div>
+          <p class="chart-note">The share of beliefs in circulation whose original discoverer is dead. Rising means the community is accumulating rather than rediscovering — this is criterion S7, and the single clearest sign that teaching is doing real work.</p>
+          <div class="chart-scroll" id="culture"></div>
+          <div class="legend">
+            <span class="item"><span class="sw" style="background:var(--c1)"></span>Map coverage %</span>
+            <span class="item"><span class="sw" style="background:var(--c3)"></span>Beliefs outliving finder %</span>
+            <span class="item"><span class="sw" style="background:var(--c2)"></span>Teaching acts per 100 ticks</span>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="chart-head"><span class="chart-title">Do households that teach last longer?</span></div>
+          <p class="chart-note">One dot per household: teaching acts against generations reached. The relationship is the point of the whole culture layer — if it were flat, teaching would be decorative.</p>
+          <div id="teach"></div>
+        </div>
+
+        <div class="card">
+          <div class="chart-head"><span class="chart-title">Belief accuracy by hop count</span></div>
+          <p class="chart-note">Share of acted-on beliefs that turned out stale. Hearsay three tellings deep is wrong more often than it is right — which is what makes a long committed horizon on secondhand knowledge a genuine gamble.</p>
+          <div id="hops"></div>
+          <details class="table-view">
+            <summary>Table view</summary>
+            <table class="data">
+              <thead><tr><th>Provenance</th><th class="n">Acted on</th><th class="n">Was stale</th></tr></thead>
+              <tbody>
+                <tr><td class="name">Firsthand</td><td class="n">2,140</td><td class="n">8%</td></tr>
+                <tr><td class="name">1 hop</td><td class="n">1,388</td><td class="n">24%</td></tr>
+                <tr><td class="name">2 hops</td><td class="n">702</td><td class="n">41%</td></tr>
+                <tr><td class="name">3+ hops</td><td class="n">266</td><td class="n">58%</td></tr>
+              </tbody>
+            </table>
+          </details>
+        </div>
+      </div>
+
+      <!-- economy ------------------------------------------------------- -->
+      <div class="section-rule"><h2>Economy</h2></div>
+      <div class="grid g3">
+        <div class="card">
+          <div class="chart-head"><span class="chart-title">Stored food vs. spoiled food</span></div>
+          <p class="chart-note">Grain accumulates; forage rots. The gap between the two lines is the reproduction reserve the community can actually hold.</p>
+          <div class="chart-scroll" id="food"></div>
+          <div class="legend">
+            <span class="item"><span class="sw" style="background:var(--c1)"></span>Grain stored</span>
+            <span class="item"><span class="sw" style="background:var(--c4)"></span>Spoiled</span>
+          </div>
+        </div>
+        <div class="card">
+          <div class="chart-head"><span class="chart-title">Farming adoption</span></div>
+          <p class="chart-note">Share of adults who planted at least once. Since only grain reaches the reserve, this line forecasts births about 200 ticks ahead of them.</p>
+          <div class="chart-scroll" id="farm"></div>
+        </div>
+        <div class="card">
+          <div class="chart-head"><span class="chart-title">Where the wood goes</span></div>
+          <p class="chart-note">Fuel carried on expeditions is the community's real spend on exploration — it tracks map coverage more closely than any other number.</p>
+          <div id="wood"></div>
+        </div>
+      </div>
+
+      <!-- the model ----------------------------------------------------- -->
+      <div class="section-rule"><h2>The model</h2></div>
+      <div class="grid g4" style="margin-bottom:14px">
+        <div class="card stat">
+          <div class="eyebrow">Calls this run</div>
+          <div class="big">28,401</div>
+          <div class="sub">qwen3:8b · 6 per tick budget</div>
+        </div>
+        <div class="card stat">
+          <div class="eyebrow">Median latency</div>
+          <div class="big">218<span style="font-size:15px;color:var(--ink-3)"> ms</span></div>
+          <div class="sub">p95 1,340 ms on deep reasoning</div>
+        </div>
+        <div class="card stat">
+          <div class="eyebrow">Fallback rate</div>
+          <div class="big" style="color:var(--st-good)">1.8%</div>
+          <div class="sub">unparseable after one repair retry</div>
+        </div>
+        <div class="card stat">
+          <div class="eyebrow">Plans run to completion</div>
+          <div class="big">64%</div>
+          <div class="sub">36% abort early · healthy volatility</div>
+        </div>
+      </div>
+
+      <div class="grid g2">
+        <div class="card">
+          <div class="chart-head"><span class="chart-title">Committed horizon vs. ticks actually run</span></div>
+          <p class="chart-note">Points on the dashed line ran to completion. Points far below it are plans the world invalidated. A tight cluster on the line would mean the world is too predictable and horizon choice has stopped being a decision — that is criterion S6 failing quietly.</p>
+          <div id="horizon"></div>
+        </div>
+
+        <div class="card">
+          <div class="chart-head"><span class="chart-title">Is the model earning its keep?</span></div>
+          <p class="chart-note">Action mix chosen by the model against the deterministic policy on the same states. If these two converge, the LLM has stopped mattering and S6 has failed.</p>
+          <div class="chart-scroll" id="s6"></div>
+          <div class="legend">
+            <span class="item"><span class="sw" style="background:var(--c1)"></span>Model chose</span>
+            <span class="item"><span class="sw" style="background:var(--c5)"></span>Policy would have</span>
+          </div>
+          <p style="font-size:11px;margin-top:10px">The model farms, teaches and explores far more than the policy does, and rests less. Divergence is <span class="num quick">0.42</span> Jensen–Shannon — comfortably load-bearing.</p>
+        </div>
+
+        <div class="card span2">
+          <div class="chart-head"><span class="chart-title">Where deliberation goes, by age</span></div>
+          <p class="chart-note">Infants are 25% of the population and take 2% of the calls. Prime adults are 24% and take 51%. This is the age weighting working as designed — thinking concentrated on the creatures whose choices move the simulation.</p>
+          <div class="chart-scroll" id="age"></div>
+          <div class="legend">
+            <span class="item"><span class="sw" style="background:var(--c5)"></span>Share of population</span>
+            <span class="item"><span class="sw" style="background:var(--c1)"></span>Share of LLM calls</span>
+          </div>
+        </div>
+      </div>
+
+      <p style="font-size:11px;margin-top:24px" class="dim">
+        Ashfen · seed 44127 · 4,118 ticks · 1,161 creatures recorded · 28,401 decisions retained ·
+        database 214 MB
+      </p>
+    </main>
+  </div>
+</div>
+
+<script src="mock.js"></script>
+<script>
+/* ---------------------------------------------------- population */
+const T = [], POP = [], BIRTH = [], DEATH = [];
+{
+  const r = rng(9001);
+  let p = 8;
+  for (let i = 0; i <= 41; i++) {
+    const t = i * 100;
+    if (i < 4) p += 3;
+    else if (i < 19) p += 7 + r() * 9;
+    else if (i < 22) p -= 22 + r() * 12;          // the generation-2 grain gap
+    else p += 4 + r() * 8;
+    p = Math.max(11, Math.round(p));
+    T.push(t); POP.push(p);
+    BIRTH.push(Math.round(4 + r() * 9 + (i > 22 ? 4 : 0)));
+    DEATH.push(Math.round(3 + r() * 7 + (i >= 19 && i < 22 ? 26 : 0)));
+  }
+}
+lineChart(document.getElementById('pop'), {
+  title: 'Population over time', width: 540, height: 210,
+  x: T, xTicks: [{i:0,l:'0'},{i:10,l:'1,000'},{i:20,l:'2,000'},{i:30,l:'3,000'},{i:41,l:'4,118'}],
+  series: [
+    { name: 'Alive',  v: POP,   color: 'var(--c1)', area: true },
+    { name: 'Births', v: BIRTH, color: 'var(--c3)' },
+    { name: 'Deaths', v: DEATH, color: 'var(--c4)' }
+  ]
+});
+
+/* ---------------------------------------------------- cause of death */
+stackedBars(document.getElementById('cod'), {
+  title: 'Cause of death by generation', width: 540, height: 210,
+  keys: ['Starvation','Exposure','Old age','Dehydration','Childbirth','Accident'],
+  groups: [
+    { name: 'g1', v: [42, 31, 9, 14, 3, 5] },
+    { name: 'g2', v: [118, 44, 18, 21, 9, 8] },
+    { name: 'g3', v: [96, 38, 51, 12, 14, 11] },
+    { name: 'g4', v: [61, 29, 88, 8, 16, 9] },
+    { name: 'g5', v: [38, 22, 104, 5, 12, 7] },
+    { name: 'g6', v: [14, 9, 41, 2, 5, 3] }
+  ]
+});
+
+/* ---------------------------------------------------- age at death */
+{
+  const bins = [];
+  const shape = [88,132,96,54,26,14,11,13,18,26,38,54,76,104,138,166,182,148,72,14];
+  shape.forEach((v, i) => bins.push({
+    name: String(i * 40), v,
+    color: i < 4 ? 'var(--c4)' : 'var(--c1)'
+  }));
+  histogram(document.getElementById('aad'), {
+    title: 'Age at death', width: 540, height: 200, bins, labelEvery: 4,
+    marker: 16.8, markerLabel: '672 baseline'
+  });
+}
+
+/* ---------------------------------------------------- lineage */
+rankedBars(document.getElementById('lineage'), {
+  title: 'Deepest bloodlines', labelW: 118, suffix: '',
+  unit: 'descendants:',
+  rows: [
+    { name: 'Ottel (founder)',  v: 34, color: 'var(--c1)', note: 'gen 6 · 11 alive' },
+    { name: 'Iska (founder)',   v: 27, color: 'var(--c1)', note: 'gen 5 · 9 alive' },
+    { name: 'Delle (founder)',  v: 19, color: 'var(--c1)', note: 'gen 5 · 6 alive' },
+    { name: 'Grath (founder)',  v: 6,  color: 'var(--still)', note: 'ended gen 2' },
+    { name: 'Kest (founder)',   v: 4,  color: 'var(--still)', note: 'ended gen 2' },
+    { name: 'Onn (founder)',    v: 3,  color: 'var(--still)', note: 'ended gen 2' },
+    { name: 'Vesk (founder)',   v: 1,  color: 'var(--still)', note: 'ended gen 2' },
+    { name: 'Nix (founder)',    v: 0,  color: 'var(--still)', note: 'no children' }
+  ]
+});
+
+/* ---------------------------------------------------- culture */
+lineChart(document.getElementById('culture'), {
+  title: 'Knowledge across generations', width: 1080, height: 220, maxY: 60,
+  x: [500,1000,1500,2000,2500,3000,3500,4118],
+  xTicks: [{i:0,l:'500'},{i:2,l:'1,500'},{i:4,l:'2,500'},{i:6,l:'3,500'},{i:7,l:'4,118'}],
+  series: [
+    { name: 'Coverage %',        v: [6, 12, 15, 11, 19, 24, 28, 31], color: 'var(--c1)' },
+    { name: 'Outliving finder %', v: [0, 4, 11, 9, 21, 30, 38, 44], color: 'var(--c3)', area: true },
+    { name: 'Teaching / 100t',   v: [0, 1, 4, 3, 9, 14, 17, 21], color: 'var(--c2)' }
+  ]
+});
+
+/* ---------------------------------------------------- teaching vs depth */
+{
+  const r = rng(4242);
+  const pts = [];
+  for (let i = 0; i < 34; i++) {
+    const teach = Math.round(r() * 60);
+    const depth = Math.max(1, Math.min(6, Math.round(1.4 + teach / 14 + (r() - .5) * 1.7)));
+    pts.push([teach, depth, 5]);
+  }
+  scatter(document.getElementById('teach'), {
+    title: 'Teaching against lineage depth', width: 500, height: 250,
+    maxX: 62, maxY: 7,
+    xLabel: 'teaching acts by the household  →',
+    yLabel: 'generations reached',
+    points: pts,
+    colorFn: p => p[1] >= 4 ? 'var(--c3)' : 'var(--c4)',
+    tipFn: p => `<span class="tip-t">household</span>${p[0]} teaching acts<br>reached generation <b>${p[1]}</b>`
+  });
+}
+
+/* ---------------------------------------------------- hops */
+rankedBars(document.getElementById('hops'), {
+  title: 'Belief staleness by hops', labelW: 82, suffix: '%',
+  rows: [
+    { name: 'Firsthand', v: 8,  color: 'var(--seq-5)', note: '2,140 acted on' },
+    { name: '1 hop',     v: 24, color: 'var(--seq-4)', note: '1,388 acted on' },
+    { name: '2 hops',    v: 41, color: 'var(--seq-3)', note: '702 acted on' },
+    { name: '3+ hops',   v: 58, color: 'var(--seq-2)', note: '266 acted on' }
+  ]
+});
+
+/* ---------------------------------------------------- economy */
+lineChart(document.getElementById('food'), {
+  title: 'Stored vs spoiled', width: 340, height: 180, maxY: 420,
+  x: [500,1000,1500,2000,2500,3000,3500,4118],
+  xTicks: [{i:0,l:'500'},{i:3,l:'2,000'},{i:7,l:'4,118'}],
+  series: [
+    { name: 'Grain', v: [12, 31, 74, 22, 118, 196, 288, 372], color: 'var(--c1)', area: true },
+    { name: 'Spoiled', v: [48, 66, 91, 128, 104, 88, 76, 71], color: 'var(--c4)' }
+  ]
+});
+lineChart(document.getElementById('farm'), {
+  title: 'Farming adoption', width: 340, height: 180, maxY: 100, unit: '%',
+  x: [500,1000,1500,2000,2500,3000,3500,4118],
+  xTicks: [{i:0,l:'500'},{i:3,l:'2,000'},{i:7,l:'4,118'}],
+  directLabel: false,
+  series: [{ name: 'Adults who planted', v: [0, 2, 9, 14, 38, 57, 71, 78], color: 'var(--c1)', area: true }]
+});
+rankedBars(document.getElementById('wood'), {
+  title: 'Wood budget', labelW: 96, suffix: '',
+  rows: [
+    { name: 'Fire at home', v: 2140, color: 'var(--c6)' },
+    { name: 'Shelter',      v: 1188, color: 'var(--c6)' },
+    { name: 'Carried fuel', v: 604,  color: 'var(--c1)', note: 'the exploration budget' },
+    { name: 'Repair',       v: 318,  color: 'var(--c6)' },
+    { name: 'Pens',         v: 96,   color: 'var(--c6)' }
+  ]
+});
+
+/* ---------------------------------------------------- model */
+{
+  const r = rng(31337);
+  const pts = [];
+  for (let i = 0; i < 90; i++) {
+    const c = 2 + Math.round(r() * 22);
+    const ran = r() > .36 ? c : Math.max(1, Math.round(c * (0.1 + r() * 0.55)));
+    pts.push([c, ran, 4]);
+  }
+  scatter(document.getElementById('horizon'), {
+    title: 'Committed vs actual horizon', width: 500, height: 260, maxX: 26,
+    xLabel: 'ticks committed  →',
+    yLabel: 'ticks actually run',
+    diagonal: true, diagonalLabel: 'ran to completion',
+    points: pts,
+    colorFn: p => p[1] < p[0] * 0.6 ? 'var(--c4)' : 'var(--c3)',
+    tipFn: p => `<span class="tip-t">plan</span>committed <b>${p[0]}</b> ticks<br>ran <b>${p[1]}</b> ticks`
+  });
+}
+
+groupedBars(document.getElementById('s6'), {
+  title: 'Model choices vs policy choices', width: 520, height: 210,
+  keys: ['Model chose', 'Policy would have'],
+  colors: ['var(--c1)', 'var(--c5)'],
+  maxY: 32, unit: '%',
+  groups: [
+    { name: 'forage', v: [11, 28] },
+    { name: 'farm',   v: [19, 3] },
+    { name: 'chop',   v: [14, 12] },
+    { name: 'herd',   v: [8, 2] },
+    { name: 'teach',  v: [9, 0] },
+    { name: 'share',  v: [12, 1] },
+    { name: 'rest',   v: [7, 24] },
+    { name: 'explore',v: [10, 1] }
+  ]
+});
+
+groupedBars(document.getElementById('age'), {
+  title: 'Deliberation by life stage', width: 1080, height: 210,
+  keys: ['Share of population', 'Share of LLM calls'],
+  colors: ['var(--c5)', 'var(--c1)'],
+  maxY: 60, unit: '%',
+  groups: [
+    { name: 'infant 0–168',   v: [25, 2] },
+    { name: 'emerging 168–220', v: [8, 14] },
+    { name: 'prime 220–380',  v: [24, 51] },
+    { name: 'mature 380–588', v: [31, 28] },
+    { name: 'elder 588+',     v: [12, 5] }
+  ]
+});
+</script>
+</body>
+</html>
