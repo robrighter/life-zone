@@ -20,6 +20,10 @@ pub struct WorldConfig {
     pub llm: LlmConfig,
     pub deliberation: DeliberationConfig,
     pub knowledge: KnowledgeConfig,
+    pub actions: ActionConfig,
+    pub hazards: HazardConfig,
+    pub persistence: PersistenceConfig,
+    pub bench: BenchConfig,
     pub features: FeatureToggles,
 }
 
@@ -58,11 +62,31 @@ impl Default for ResourceConfig {
     fn default() -> Self {
         Self {
             // Fractions of the terrain that suits each kind, not of the whole
-            // map. Tuned so forest reads as ground with patches in it rather
-            // than as a crosshatch of markers.
-            forage_density: 0.006, wood_density: 0.008, soil_density: 0.012,
+            // map. M1 tuned these so forest reads as ground with patches in it
+            // rather than as a crosshatch of markers — a purely visual test,
+            // because there were no creatures yet to feed.
+            //
+            // M2 measured them against a population for the first time and they
+            // were an order of magnitude short: 185 forage nodes regenerating
+            // 3.7 units/tick fed about 40 creatures against a target of 500,
+            // and every run ended with the map stripped bare and half of all
+            // deaths by starvation.
+            //
+            // Now set so the map's forage regrows about 1.6x what 500 creatures
+            // eat. That is deliberately *not* tight: with supply at 85% of
+            // demand a fixed share of the population starved no matter what any
+            // individual did, which makes skill, knowledge and position
+            // irrelevant — the worst kind of difficulty. The food has to be out
+            // there; what should kill a creature is failing to reach it, being
+            // in the wrong place at nightfall, or acting on a belief that has
+            // gone stale. Scarcity bites through distribution, not arithmetic.
+            forage_density: 0.020, wood_density: 0.016, soil_density: 0.012,
             sheep_flocks: 14,
-            forage_regen_per_tick: 0.02, wood_regen_per_tick: 0.008,
+            forage_regen_per_tick: 0.12,
+            // Wood is in continuous demand once it is fuel as well as timber:
+            // a night's fire is ~5 wood and a shelter is 14, against a
+            // population of 500.
+            wood_regen_per_tick: 0.06,
             forage_spoil_ticks: 48,   // ~2 days
             meat_spoil_ticks: 96,     // ~4 days
             grain_spoil_ticks: None,  // keeps indefinitely
@@ -90,7 +114,10 @@ impl Default for NeedsConfig {
             hunger_decay_per_tick: 0.55,
             thirst_decay_per_tick: 0.85, // decays faster than hunger (§4.5)
             fatigue_decay_per_tick: 0.40,
-            warmth_decay_night: 1.6,
+            // Night has to cost more than the day restores, or warmth never
+            // falls, shelter is decorative and nothing ever dies of exposure —
+            // which is exactly what M2's first measured run showed.
+            warmth_decay_night: 3.2,
             deficit_threshold: 30.0,
             critical_threshold: 10.0,
             health_erosion_per_tick: 0.6,
@@ -250,6 +277,11 @@ pub struct KnowledgeConfig {
     pub teach_fidelity: f32,
     pub share_ticks: u32,
     pub max_beliefs_in_prompt: u32,
+    /// How many beliefs a creature can hold at once. Distinct from the prompt
+    /// cap: what a creature remembers and what fits in a prompt are different
+    /// questions, and tying them together made memory shrink whenever the
+    /// prompt budget did.
+    pub max_beliefs_held: u32,
 }
 impl Default for KnowledgeConfig {
     fn default() -> Self {
@@ -262,8 +294,159 @@ impl Default for KnowledgeConfig {
             teach_fidelity: 1.0, // transmits at hops:0, as though firsthand
             share_ticks: 1,
             max_beliefs_in_prompt: 8,
+            max_beliefs_held: 48,
         }
     }
+}
+
+
+/// Action yields, costs and rates (PRD §6). These are the numbers that decide
+/// whether the world is survivable, so they live in config rather than as
+/// constants: tuning them is the main lever M6 pulls against S3.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ActionConfig {
+    /// Units of path cost a creature clears per tick at full health.
+    pub move_speed: f32,
+    pub carry_capacity: f32,
+
+    pub gather_forage_per_tick: f32,
+    pub chop_wood_per_tick: f32,
+    pub harvest_wheat_per_tick: f32,
+    /// Night reduces forage yield (§4.1), which is what makes daylight worth
+    /// something beyond warmth.
+    pub night_forage_scale: f32,
+
+    /// One EAT action consumes this many units from the oldest batch.
+    pub eat_portion: f32,
+    pub drink_restore: f32,
+    pub rest_restore: f32,
+    /// Fatigue is restored faster in shelter (§4.5).
+    pub rest_restore_sheltered: f32,
+
+    pub shelter_wood_cost: f32,
+    pub shelter_build_ticks: u32,
+    pub shelter_capacity: u32,
+    /// Warmth restored per tick while inside.
+    pub shelter_warmth: f32,
+    pub shelter_decay_per_tick: f32,
+
+    pub fire_wood_cost: f32,
+    pub fire_warmth: f32,
+    pub fire_warmth_radius: u32,
+
+    pub plant_ticks: u32,
+    pub tend_ticks: u32,
+    pub slaughter_yield: f32,
+
+    /// How far an EXPLORE step commits to travelling from the creature.
+    pub explore_distance: u32,
+
+    /// Night runs 20:00–06:00 (§4.1).
+    pub night_start_hour: u32,
+    pub night_end_hour: u32,
+}
+impl Default for ActionConfig {
+    fn default() -> Self {
+        Self {
+            move_speed: 1.0,
+            // Wood and food share the pack, so capacity is what decides
+            // whether a creature can ever accumulate the timber for a shelter
+            // while still carrying a meal. At 20 against a 14-wood shelter it
+            // could not, and five shelters went up in a 2,000-tick run.
+            carry_capacity: 26.0,
+            gather_forage_per_tick: 1.6,
+            chop_wood_per_tick: 1.4,
+            harvest_wheat_per_tick: 2.2,
+            night_forage_scale: 0.45,
+            eat_portion: 2.0,
+            drink_restore: 55.0,
+            rest_restore: 7.0,
+            rest_restore_sheltered: 12.0,
+            shelter_wood_cost: 12.0,
+            shelter_build_ticks: 8,
+            shelter_capacity: 6,
+            shelter_warmth: 9.0,
+            // A building, not a sandcastle. At 0.01 a shelter fell derelict in
+            // 100 ticks — under four in-game days — so nothing ever stayed
+            // standing long enough to be worth the 14 wood it cost.
+            shelter_decay_per_tick: 0.0015,
+            fire_wood_cost: 2.0,
+            fire_warmth: 7.0,
+            fire_warmth_radius: 2,
+            plant_ticks: 4,
+            tend_ticks: 3,
+            slaughter_yield: 10.0,
+            explore_distance: 26,
+            night_start_hour: 20,
+            night_end_hour: 6,
+        }
+    }
+}
+
+/// Discrete misfortune (§4.6). Rare on purpose: these exist so the
+/// cause-of-death breakdown has a tail, not so they dominate it.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct HazardConfig {
+    /// Per-tick chance of an accident while doing hazardous work (chopping,
+    /// slaughtering) or crossing hills and water.
+    pub accident_per_tick: f32,
+    /// Per-tick chance of illness, scaled up as health falls.
+    pub illness_per_tick: f32,
+    pub illness_low_health_multiplier: f32,
+}
+impl Default for HazardConfig {
+    fn default() -> Self {
+        Self {
+            // Rare, but not so rare that the tail of the cause-of-death
+            // breakdown is empty: at 0.00022 a whole 2,000-tick run produced a
+            // single injury and no accidental deaths at all.
+            accident_per_tick: 0.0016,
+            illness_per_tick: 0.00016,
+            illness_low_health_multiplier: 6.0,
+        }
+    }
+}
+
+/// How often RAM state is checkpointed to SQLite.
+///
+/// Needs change on every creature every tick, so writing `creatures` per tick
+/// would be a per-creature-per-tick table by another name (invariant 5) and
+/// would dominate the Fast-Forward budget. Events and `tick_stats` are written
+/// every tick; creature rows and beliefs are checkpointed, and always flushed
+/// on death, pause, and shutdown.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct PersistenceConfig {
+    pub checkpoint_interval_ticks: u32,
+    pub sample_interval_ticks: u32,
+}
+impl Default for PersistenceConfig {
+    fn default() -> Self {
+        // 120, not 24. A checkpoint writes every living creature, and at 500
+        // creatures that is a ~20ms spike whatever else is going on. Spacing
+        // them out does not make a spike smaller, but it makes them rare enough
+        // to fall outside the p99 the Fast-Forward budget is judged on, and a
+        // crash still costs at most a couple of in-game days.
+        Self { checkpoint_interval_ticks: 120, sample_interval_ticks: 24 }
+    }
+}
+
+/// Measurement fixtures. Not part of the simulation's rules.
+///
+/// M2 has no reproduction — that is M4 — so a cohort seeded at 500 dies out by
+/// roughly tick 700 and there is no way to measure "500 creatures at <50ms per
+/// tick over 1,000 ticks" honestly. `maintain_population` holds the census by
+/// admitting a new unrelated settler whenever one dies, purely so the
+/// performance and cause-of-death criteria can be measured at the stated
+/// population. It is off in normal play and is replaced by real reproduction at
+/// M4; runs made with it on are labelled as such in `tick_stats`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct BenchConfig {
+    pub initial_creatures: Option<u32>,
+    pub maintain_population: Option<u32>,
 }
 
 /// Toggles for the S4/S6 experiments (§11). Turning one off and re-running the

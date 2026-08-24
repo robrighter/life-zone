@@ -226,6 +226,586 @@ pub fn load_resource_nodes(conn: &Connection, world_id: i64) -> Result<Vec<Resou
 }
 
 
+// ------------------------------------------------------------ M2: the sim
+
+use crate::sim::actions::AbortReason;
+use crate::sim::creature::{Creature, DeathCause, Inventory, LifeStage, Plan, Sex, Traits};
+use crate::sim::economy::{Structure, StructureKind, Structures};
+use crate::sim::event::Event;
+use crate::sim::knowledge::{Belief, BeliefKind, Estimate};
+use crate::sim::tick::{DecisionRecord, PlanOutcome, TickReport};
+use rusqlite::Transaction;
+
+/// Append this tick's events.
+///
+/// Events are outcomes, not state: nothing here fires for movement, need decay
+/// or partial progress, because a row per creature per tick is invariant 5
+/// wearing a different hat.
+pub fn insert_events(tx: &Transaction, world_id: i64, events: &[Event]) -> Result<()> {
+    if events.is_empty() {
+        return Ok(());
+    }
+    let mut stmt = tx.prepare_cached(
+        "INSERT INTO events (world_id, tick, kind, actor_id, target_id, x, y, payload_json)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+    )?;
+    for e in events {
+        stmt.execute(rusqlite::params![
+            world_id,
+            e.tick,
+            e.kind.as_str(),
+            e.actor_id.filter(|id| *id != 0),
+            e.target_id,
+            e.x,
+            e.y,
+            e.payload,
+        ])?;
+    }
+    Ok(())
+}
+
+/// Record every decision. At M2 they are all tier 1; the LLM columns stay null
+/// until M3 fills them, which is why they exist now rather than being migrated
+/// in later (invariant 4).
+pub fn insert_decisions(tx: &Transaction, world_id: i64, rows: &[DecisionRecord]) -> Result<()> {
+    if rows.is_empty() {
+        return Ok(());
+    }
+    let mut stmt = tx.prepare_cached(
+        "INSERT INTO decisions
+           (world_id, tick, creature_id, tier, creature_age_ticks, life_stage,
+            parsed_plan_json, horizon_committed, fallback_used, fallback_reason)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 0, ?9)",
+    )?;
+    for d in rows {
+        // Compact rather than a full plan blob: at M2 the goal, the intent and
+        // the rationale are the whole decision, and there are hundreds of
+        // thousands of them in a run.
+        let plan = format!(
+            "{{\"goal\":\"{}\",\"addresses\":\"{:?}\",\"rationale\":{}}}",
+            d.goal,
+            d.addresses,
+            serde_json::to_string(&d.rationale).unwrap_or_else(|_| "\"\"".into()),
+        );
+        stmt.execute(rusqlite::params![
+            world_id,
+            d.tick,
+            d.creature_id,
+            d.tier as i64,
+            d.age_ticks,
+            d.life_stage.as_str(),
+            plan,
+            d.horizon_committed as i64,
+            d.fallback_reason,
+        ])?;
+    }
+    Ok(())
+}
+
+/// Backfill `horizon_actual` and `abort_reason` onto the decision that issued
+/// the plan. The gap between committed and actual is plan-abandonment, which
+/// §5.5 calls the early-warning metric for the horizon mechanic failing — and
+/// it can only be known once the plan has ended.
+pub fn backfill_plan_outcomes(
+    tx: &Transaction,
+    world_id: i64,
+    outcomes: &[PlanOutcome],
+) -> Result<()> {
+    if outcomes.is_empty() {
+        return Ok(());
+    }
+    let mut stmt = tx.prepare_cached(
+        "UPDATE decisions SET horizon_actual = ?4, abort_reason = ?5
+         WHERE world_id = ?1 AND creature_id = ?2 AND tick = ?3",
+    )?;
+    for o in outcomes {
+        stmt.execute(rusqlite::params![
+            world_id,
+            o.creature_id,
+            o.set_tick,
+            o.horizon_actual as i64,
+            o.reason.as_str(),
+        ])?;
+    }
+    Ok(())
+}
+
+pub fn insert_tick_stats(tx: &Transaction, world_id: i64, r: &TickReport) -> Result<()> {
+    let timings = serde_json::to_string(&r.timings)?;
+    tx.prepare_cached(
+        "INSERT OR REPLACE INTO tick_stats
+           (world_id, tick, population, births, deaths, llm_calls, fallbacks,
+            mean_latency_ms, phase_timings_json)
+         VALUES (?1, ?2, ?3, ?4, ?5, 0, ?6, NULL, ?7)",
+    )?
+    .execute(rusqlite::params![
+        world_id,
+        r.tick,
+        r.population as i64,
+        r.births as i64,
+        r.deaths as i64,
+        r.deliberations as i64,
+        timings,
+    ])?;
+    Ok(())
+}
+
+/// Write creature rows.
+///
+/// Deliberately *not* every tick. Needs change on every creature on every tick,
+/// so a per-tick write would be 500 UPDATEs a tick and would dominate the
+/// Fast-Forward budget for data nobody reads at that resolution. Current state
+/// lives in RAM; this is the checkpoint, and it also runs on death, on pause
+/// and at shutdown so nothing that matters is ever only in memory.
+pub fn upsert_creatures<'a>(
+    tx: &Transaction,
+    world_id: i64,
+    creatures: impl IntoIterator<Item = &'a Creature>,
+) -> Result<()> {
+    // `INSERT OR REPLACE` would be the obvious way to write this and it is
+    // actively wrong here. REPLACE deletes the conflicting row before
+    // inserting, and `beliefs.creature_id` is declared
+    // `REFERENCES creatures(id) ON DELETE CASCADE` — so every checkpoint threw
+    // away the belief history of every living creature, and then paid for it: 
+    // the foreign key has no usable index on `creature_id` alone, so each of
+    // the 500 deletions scanned the whole `beliefs` table. Measured at 6
+    // seconds a checkpoint, and phase 7 at 99% of the tick.
+    //
+    // An upsert updates in place. Nothing is deleted, so nothing cascades.
+    let mut stmt = tx.prepare_cached(
+        "INSERT INTO creatures
+           (id, world_id, name, sex, generation, mother_id, father_id, household_id,
+            birth_tick, death_tick, death_cause, x, y, life_stage,
+            hunger, thirst, fatigue, warmth, health, lifespan_modifier,
+            traits_json, inventory_json, current_plan_json, plan_set_tick,
+            plan_horizon, plan_ticks_remaining, plan_step_index,
+            last_deliberation_tick, deliberation_pressure,
+            lifetime_deliberations, lifetime_think_fatigue, habit_prior_json,
+            wear, exposed_ticks, in_shelter, trauma_cause, trauma_tick)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14,
+                 ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27,
+                 ?28, ?29, ?30, ?31, NULL, ?32, ?33, ?34, ?35, ?36)
+         ON CONFLICT(id) DO UPDATE SET
+            household_id = excluded.household_id,
+            death_tick = excluded.death_tick,
+            death_cause = excluded.death_cause,
+            x = excluded.x, y = excluded.y,
+            life_stage = excluded.life_stage,
+            hunger = excluded.hunger, thirst = excluded.thirst,
+            fatigue = excluded.fatigue, warmth = excluded.warmth,
+            health = excluded.health,
+            lifespan_modifier = excluded.lifespan_modifier,
+            inventory_json = excluded.inventory_json,
+            current_plan_json = excluded.current_plan_json,
+            plan_set_tick = excluded.plan_set_tick,
+            plan_horizon = excluded.plan_horizon,
+            plan_ticks_remaining = excluded.plan_ticks_remaining,
+            plan_step_index = excluded.plan_step_index,
+            last_deliberation_tick = excluded.last_deliberation_tick,
+            deliberation_pressure = excluded.deliberation_pressure,
+            lifetime_deliberations = excluded.lifetime_deliberations,
+            lifetime_think_fatigue = excluded.lifetime_think_fatigue,
+            wear = excluded.wear,
+            exposed_ticks = excluded.exposed_ticks,
+            in_shelter = excluded.in_shelter,
+            trauma_cause = excluded.trauma_cause,
+            trauma_tick = excluded.trauma_tick",
+    )?;
+    for c in creatures {
+        let plan_json = c.plan.as_ref().map(serde_json::to_string).transpose()?;
+        stmt.execute(rusqlite::params![
+            c.id,
+            world_id,
+            c.name,
+            c.sex.as_str(),
+            c.generation,
+            c.mother_id,
+            c.father_id,
+            c.household_id,
+            c.birth_tick,
+            c.death_tick,
+            c.death_cause.map(|d| d.as_str()),
+            c.x,
+            c.y,
+            c.life_stage.as_str(),
+            c.hunger,
+            c.thirst,
+            c.fatigue,
+            c.warmth,
+            c.health,
+            c.lifespan_ticks,
+            serde_json::to_string(&c.traits)?,
+            serde_json::to_string(&c.inventory)?,
+            plan_json,
+            c.plan.as_ref().map(|p| p.set_tick),
+            c.plan.as_ref().map(|p| p.horizon as i64),
+            c.plan.as_ref().map(|p| p.ticks_remaining as i64),
+            c.plan.as_ref().map(|p| p.step_index as i64),
+            c.last_deliberation_tick,
+            c.deliberation_pressure,
+            c.lifetime_deliberations,
+            c.lifetime_think_fatigue,
+            c.wear,
+            c.exposed_ticks as i64,
+            c.in_shelter,
+            c.trauma.map(|(cause, _)| cause.as_str()),
+            c.trauma.map(|(_, at)| at),
+        ])?;
+    }
+    Ok(())
+}
+
+/// Periodic sampled state, in place of a per-creature-per-tick table (§7).
+pub fn insert_creature_samples(
+    tx: &Transaction,
+    world_id: i64,
+    tick: i64,
+    creatures: &[Creature],
+) -> Result<()> {
+    let mut stmt = tx.prepare_cached(
+        "INSERT OR REPLACE INTO creature_samples
+           (world_id, tick, creature_id, x, y, hunger, thirst, fatigue, warmth, health, life_stage)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+    )?;
+    for c in creatures {
+        stmt.execute(rusqlite::params![
+            world_id, tick, c.id, c.x, c.y,
+            c.hunger, c.thirst, c.fatigue, c.warmth, c.health,
+            c.life_stage.as_str(),
+        ])?;
+    }
+    Ok(())
+}
+
+/// Replace the stored beliefs of these creatures.
+///
+/// Beliefs live in RAM during a run (§7); this table is the persistence and
+/// reporting layer and is never on the per-tick read path.
+pub fn flush_beliefs<'a>(
+    tx: &Transaction,
+    world_id: i64,
+    creatures: impl IntoIterator<Item = &'a Creature>,
+) -> Result<()> {
+    let mut del = tx.prepare_cached(
+        "DELETE FROM beliefs WHERE world_id = ?1 AND creature_id = ?2",
+    )?;
+    let mut ins = tx.prepare_cached(
+        "INSERT INTO beliefs
+           (world_id, creature_id, kind, x, y, detail_json, confidence,
+            learned_tick, last_verified_tick, source_creature_id, hops,
+            origin_creature_id, origin_tick)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+    )?;
+    for c in creatures {
+        del.execute(rusqlite::params![world_id, c.id])?;
+        for b in &c.beliefs {
+            ins.execute(rusqlite::params![
+                world_id,
+                c.id,
+                b.kind.as_str(),
+                b.x,
+                b.y,
+                format!("{{\"est\":\"{}\"}}", b.estimate.as_str()),
+                b.confidence,
+                b.learned_tick,
+                b.last_verified_tick,
+                b.source_creature_id,
+                b.hops as i64,
+                b.origin_creature_id,
+                b.origin_tick,
+            ])?;
+        }
+    }
+    Ok(())
+}
+
+pub fn upsert_structures(tx: &Transaction, world_id: i64, structures: &[Structure]) -> Result<()> {
+    if structures.is_empty() {
+        return Ok(());
+    }
+    let mut stmt = tx.prepare_cached(
+        "INSERT OR REPLACE INTO structures
+           (id, world_id, kind, x, y, condition, capacity, household_id, built_tick,
+            fuel_remaining, lit_until_tick)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+    )?;
+    for s in structures {
+        stmt.execute(rusqlite::params![
+            s.id, world_id, s.kind.as_str(), s.x, s.y, s.condition,
+            s.capacity as i64, s.household_id, s.built_tick,
+            s.fuel_remaining, s.lit_until_tick,
+        ])?;
+    }
+    Ok(())
+}
+
+/// Structures that no longer exist in RAM (a fire burnt to cold ash) are
+/// removed, so a resume does not resurrect them.
+pub fn prune_structures(tx: &Transaction, world_id: i64, alive: &[Structure]) -> Result<()> {
+    let ids: Vec<String> = alive.iter().map(|s| s.id.to_string()).collect();
+    let sql = if ids.is_empty() {
+        "DELETE FROM structures WHERE world_id = ?1".to_string()
+    } else {
+        format!(
+            "DELETE FROM structures WHERE world_id = ?1 AND id NOT IN ({})",
+            ids.join(",")
+        )
+    };
+    tx.execute(&sql, rusqlite::params![world_id])?;
+    Ok(())
+}
+
+/// Update the live resource stock. Nodes are rewritten wholesale because
+/// planting appends to the list and quantities change everywhere every tick.
+pub fn save_resource_nodes(tx: &Transaction, world_id: i64, world: &World) -> Result<()> {
+    tx.execute("DELETE FROM resource_nodes WHERE world_id = ?1", [world_id])?;
+    let mut stmt = tx.prepare_cached(
+        "INSERT INTO resource_nodes
+           (world_id, kind, x, y, quantity, max_quantity, regen_rate, state)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'active')",
+    )?;
+    for n in &world.nodes {
+        stmt.execute(rusqlite::params![
+            world_id, n.kind.as_str(), n.x, n.y, n.quantity, n.max_quantity, n.regen_rate
+        ])?;
+    }
+    Ok(())
+}
+
+// ------------------------------------------------------------------ reading
+
+/// Living creatures, in ascending id order — the order the simulation iterates
+/// in, so a resumed run visits them exactly as an uninterrupted one would.
+pub fn load_living_creatures(conn: &Connection, world_id: i64) -> Result<Vec<Creature>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, name, sex, generation, mother_id, father_id, household_id,
+                birth_tick, death_tick, death_cause, x, y, life_stage,
+                hunger, thirst, fatigue, warmth, health, lifespan_modifier,
+                traits_json, inventory_json, current_plan_json,
+                last_deliberation_tick, deliberation_pressure,
+                lifetime_deliberations, lifetime_think_fatigue,
+                wear, exposed_ticks, in_shelter, trauma_cause, trauma_tick
+         FROM creatures WHERE world_id = ?1 AND death_tick IS NULL ORDER BY id",
+    )?;
+    let rows = stmt.query_map([world_id], |r| {
+        let traits: Traits = serde_json::from_str::<Traits>(&r.get::<_, String>(19)?)
+            .unwrap_or_default();
+        let inventory: Inventory = serde_json::from_str(&r.get::<_, String>(20)?)
+            .unwrap_or_default();
+        let plan: Option<Plan> = r
+            .get::<_, Option<String>>(21)?
+            .and_then(|s| serde_json::from_str(&s).ok());
+        Ok(Creature {
+            id: r.get(0)?,
+            name: r.get(1)?,
+            sex: Sex::parse(&r.get::<_, String>(2)?),
+            generation: r.get(3)?,
+            mother_id: r.get(4)?,
+            father_id: r.get(5)?,
+            household_id: r.get(6)?,
+            birth_tick: r.get(7)?,
+            death_tick: r.get(8)?,
+            death_cause: None,
+            x: r.get(10)?,
+            y: r.get(11)?,
+            life_stage: LifeStage::parse(&r.get::<_, String>(12)?),
+            hunger: r.get(13)?,
+            thirst: r.get(14)?,
+            fatigue: r.get(15)?,
+            warmth: r.get(16)?,
+            health: r.get(17)?,
+            lifespan_ticks: r.get(18)?,
+            wear: r.get(26)?,
+            traits,
+            inventory,
+            plan,
+            beliefs: Vec::new(),
+            last_deliberation_tick: r.get(22)?,
+            deliberation_pressure: r.get(23)?,
+            lifetime_deliberations: r.get(24)?,
+            lifetime_think_fatigue: r.get(25)?,
+            in_shelter: r.get(28)?,
+            exposed_ticks: r.get::<_, i64>(27)? as u32,
+            at_fire: false,
+            trauma: match (r.get::<_, Option<String>>(29)?, r.get::<_, Option<i64>>(30)?) {
+                (Some(cause), Some(at)) => death_cause_from_str(&cause).map(|c| (c, at)),
+                _ => None,
+            },
+            dirty: false,
+        })
+    })?;
+    Ok(rows.collect::<Result<Vec<_>, _>>()?)
+}
+
+/// Death tallies as `[count; 7]` indexed by `DeathCause`, so a resumed run
+/// continues the same running totals rather than restarting them.
+pub fn death_tallies(conn: &Connection, world_id: i64) -> Result<([u32; 7], u64, u64)> {
+    let mut tallies = [0u32; 7];
+    for (cause, n) in deaths_by_cause(conn, world_id)? {
+        if let Some(c) = death_cause_from_str(&cause) {
+            tallies[c as usize] = n as u32;
+        }
+    }
+    let born: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM creatures WHERE world_id = ?1", [world_id], |r| r.get(0),
+    )?;
+    let died: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM creatures WHERE world_id = ?1 AND death_tick IS NOT NULL",
+        [world_id], |r| r.get(0),
+    )?;
+    Ok((tallies, born as u64, died as u64))
+}
+
+/// Attach stored beliefs to creatures already loaded, matching by id.
+pub fn load_beliefs_into(conn: &Connection, world_id: i64, creatures: &mut [Creature]) -> Result<()> {
+    let mut stmt = conn.prepare(
+        "SELECT creature_id, kind, x, y, detail_json, confidence, learned_tick,
+                last_verified_tick, source_creature_id, hops, origin_creature_id, origin_tick
+         FROM beliefs WHERE world_id = ?1 ORDER BY creature_id, id",
+    )?;
+    let mut rows = stmt.query([world_id])?;
+    while let Some(row) = rows.next()? {
+        let creature_id: i64 = row.get(0)?;
+        let Some(kind) = BeliefKind::parse(&row.get::<_, String>(1)?) else {
+            continue;
+        };
+        let detail: String = row.get(4)?;
+        let estimate = if detail.contains("plentiful") {
+            Estimate::Plentiful
+        } else if detail.contains("picked over") {
+            Estimate::Sparse
+        } else if detail.contains("empty") {
+            Estimate::Empty
+        } else {
+            Estimate::Some
+        };
+        // Binary search: both sides are in ascending id order.
+        let Ok(idx) = creatures.binary_search_by_key(&creature_id, |c| c.id) else {
+            continue;
+        };
+        creatures[idx].beliefs.push(Belief {
+            kind,
+            x: row.get(2)?,
+            y: row.get(3)?,
+            estimate,
+            confidence: row.get(5)?,
+            learned_tick: row.get(6)?,
+            last_verified_tick: row.get(7)?,
+            source_creature_id: row.get(8)?,
+            hops: row.get::<_, i64>(9)? as u8,
+            origin_creature_id: row.get(10)?,
+            origin_tick: row.get(11)?,
+        });
+    }
+    Ok(())
+}
+
+pub fn load_structures(conn: &Connection, world_id: i64) -> Result<Structures> {
+    let mut stmt = conn.prepare(
+        "SELECT id, kind, x, y, condition, capacity, household_id, built_tick,
+                fuel_remaining, lit_until_tick
+         FROM structures WHERE world_id = ?1 ORDER BY id",
+    )?;
+    let rows = stmt.query_map([world_id], |r| {
+        Ok(Structure {
+            id: r.get(0)?,
+            kind: StructureKind::parse(&r.get::<_, String>(1)?),
+            x: r.get(2)?,
+            y: r.get(3)?,
+            condition: r.get(4)?,
+            capacity: r.get::<_, i64>(5)? as u32,
+            occupants: 0,
+            household_id: r.get(6)?,
+            built_tick: r.get(7)?,
+            fuel_remaining: r.get(8)?,
+            lit_until_tick: r.get(9)?,
+            dirty: false,
+        })
+    })?;
+    let items: Vec<Structure> = rows.collect::<Result<Vec<_>, _>>()?;
+    let next = items.iter().map(|s| s.id).max().unwrap_or(0) + 1;
+    let mut st = Structures::with_next_id(next);
+    st.items = items;
+    Ok(st)
+}
+
+/// The next free creature id, so a resumed run never reuses one.
+pub fn next_creature_id(conn: &Connection, world_id: i64) -> Result<i64> {
+    let n: Option<i64> = conn.query_row(
+        "SELECT MAX(id) FROM creatures WHERE world_id = ?1",
+        [world_id],
+        |r| r.get(0),
+    )?;
+    Ok(n.unwrap_or(0) + 1)
+}
+
+/// Cause-of-death tallies — the M2 exit criterion, read straight from the DB.
+pub fn deaths_by_cause(conn: &Connection, world_id: i64) -> Result<Vec<(String, i64)>> {
+    let mut stmt = conn.prepare(
+        "SELECT death_cause, COUNT(*) FROM creatures
+         WHERE world_id = ?1 AND death_cause IS NOT NULL
+         GROUP BY death_cause ORDER BY COUNT(*) DESC",
+    )?;
+    let rows = stmt.query_map([world_id], |r| Ok((r.get(0)?, r.get(1)?)))?;
+    Ok(rows.collect::<Result<Vec<_>, _>>()?)
+}
+
+/// Recent events, newest first — the ticker.
+pub fn recent_events(conn: &Connection, world_id: i64, limit: i64) -> Result<Vec<Event>> {
+    let mut stmt = conn.prepare(
+        "SELECT tick, kind, actor_id, target_id, x, y, payload_json
+         FROM events WHERE world_id = ?1 ORDER BY id DESC LIMIT ?2",
+    )?;
+    let rows = stmt.query_map(rusqlite::params![world_id, limit], |r| {
+        Ok((
+            r.get::<_, i64>(0)?,
+            r.get::<_, String>(1)?,
+            r.get::<_, Option<i64>>(2)?,
+            r.get::<_, Option<i64>>(3)?,
+            r.get::<_, Option<u32>>(4)?,
+            r.get::<_, Option<u32>>(5)?,
+            r.get::<_, String>(6)?,
+        ))
+    })?;
+    let mut out = Vec::new();
+    for row in rows {
+        let (tick, kind, actor, target, x, y, payload) = row?;
+        // Kinds are round-tripped by name; an unknown one is skipped rather
+        // than crashing a reader against a newer writer.
+        let Some(kind) = event_kind_from_str(&kind) else { continue };
+        out.push(Event { tick, kind, actor_id: actor, target_id: target, x, y, payload });
+    }
+    Ok(out)
+}
+
+fn event_kind_from_str(s: &str) -> Option<crate::sim::event::EventKind> {
+    use crate::sim::event::EventKind as K;
+    Some(match s {
+        "BORN" => K::Born, "DIED" => K::Died, "ARRIVED" => K::Arrived,
+        "GATHERED" => K::Gathered, "CHOPPED" => K::Chopped, "HARVESTED" => K::Harvested,
+        "PLANTED" => K::Planted, "TENDED" => K::Tended, "SLAUGHTERED" => K::Slaughtered,
+        "DRANK" => K::Drank, "ATE" => K::Ate, "RESTED" => K::Rested,
+        "SHELTERED" => K::Sheltered, "FIRE_LIT" => K::FireLit, "FIRE_FED" => K::FireFed,
+        "FIRE_OUT" => K::FireOut, "SHELTER_BUILT" => K::ShelterBuilt,
+        "SHELTER_REPAIRED" => K::ShelterRepaired, "DISCOVERED" => K::Discovered,
+        "VERIFIED" => K::Verified, "FORGOT" => K::Forgot, "PLAN_SET" => K::PlanSet,
+        "PLAN_DONE" => K::PlanDone, "PLAN_ABANDONED" => K::PlanAbandoned,
+        "SPOILED" => K::Spoiled, "EXPOSED_NIGHT" => K::ExposedNight,
+        "INJURED" => K::Injured, "FELL_ILL" => K::FellIll, "SETTLED" => K::Settled,
+        _ => return None,
+    })
+}
+
+/// Unused at M2 but part of the typed surface the reporting layer needs; kept
+/// here so the enum round-trip has one home.
+pub fn death_cause_from_str(s: &str) -> Option<DeathCause> {
+    DeathCause::ALL.into_iter().find(|c| c.as_str() == s)
+}
+
+pub fn abort_reason_str(r: AbortReason) -> &'static str {
+    r.as_str()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

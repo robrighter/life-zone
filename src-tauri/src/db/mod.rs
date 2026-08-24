@@ -8,11 +8,10 @@ use std::path::Path;
 
 /// Migrations are embedded so a packaged build has no external file dependency.
 /// Append-only: never edit a migration that has shipped.
-const MIGRATIONS: &[(i32, &str, &str)] = &[(
-    1,
-    "001_initial",
-    include_str!("migrations/001_initial.sql"),
-)];
+const MIGRATIONS: &[(i32, &str, &str)] = &[
+    (1, "001_initial", include_str!("migrations/001_initial.sql")),
+    (2, "002_sim_state", include_str!("migrations/002_sim_state.sql")),
+];
 
 /// Open the database, apply pragmas, and bring the schema up to date.
 pub fn open(path: &Path) -> Result<Connection> {
@@ -79,7 +78,7 @@ mod tests {
     fn migrations_apply_from_empty() {
         let conn = mem();
         let v: i32 = conn.query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap();
-        assert_eq!(v, 1);
+        assert_eq!(v, 2);
     }
 
     #[test]
@@ -88,7 +87,26 @@ mod tests {
         // Running again must be a no-op rather than an error.
         migrate(&conn).unwrap();
         let v: i32 = conn.query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap();
-        assert_eq!(v, 1);
+        assert_eq!(v, 2);
+    }
+
+    #[test]
+    fn a_database_at_version_one_upgrades_in_place() {
+        // Migrations are append-only: an existing world must survive the M2
+        // schema arriving without being recreated.
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(include_str!("migrations/001_initial.sql")).unwrap();
+        conn.execute_batch("PRAGMA user_version = 1").unwrap();
+
+        migrate(&conn).unwrap();
+
+        let v: i32 = conn.query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap();
+        assert_eq!(v, 2);
+        let n: i32 = conn
+            .query_row("SELECT COUNT(*) FROM pragma_table_info('creatures') WHERE name = 'wear'",
+                       [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(n, 1, "the new column is there");
     }
 
     #[test]

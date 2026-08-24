@@ -15,14 +15,18 @@ export class ChunkCache {
   readonly chunksX: number;
   readonly chunksY: number;
 
+  private nodes: ResourceNode[];
+
   constructor(
     private meta: WorldMeta,
     private terrain: Uint8Array,
     private palette: CanvasPalette,
+    nodes: ResourceNode[] = [],
   ) {
     this.chunksX = Math.ceil(meta.width / meta.chunk_size);
     this.chunksY = Math.ceil(meta.height / meta.chunk_size);
-    this.tint = this.buildResourceTint(meta.nodes);
+    this.nodes = nodes;
+    this.tint = this.buildResourceTint(nodes);
   }
 
   /**
@@ -68,12 +72,12 @@ export class ChunkCache {
 
   setPalette(p: CanvasPalette) {
     this.palette = p;
-    this.tint = this.buildResourceTint(this.meta.nodes);
+    this.tint = this.buildResourceTint(this.nodes);
     this.invalidateAll();
   }
 
   setNodes(nodes: ResourceNode[]) {
-    this.meta = { ...this.meta, nodes };
+    this.nodes = nodes;
     this.tint = this.buildResourceTint(nodes);
     this.invalidateAll();
   }
