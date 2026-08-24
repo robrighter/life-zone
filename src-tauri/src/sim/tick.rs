@@ -17,12 +17,18 @@
 use crate::ai::policy::{self, PolicyCtx};
 use crate::config::WorldConfig;
 use crate::sim::actions::{self, AbortReason, ActionCtx, Outcome};
-use crate::sim::creature::{Addresses, Creature, DeathCause, Inventory, LifeStage, Sex, Traits};
+use crate::sim::creature::{
+    Addresses, Creature, DeathCause, Inventory, ItemKind, LifeStage, Sex, Traits,
+};
 use crate::sim::economy::{self, NodeIndex, Structures};
 use crate::sim::event::{Event, EventKind};
 use crate::sim::knowledge;
 use crate::sim::pathfind::Pathfinder;
+use crate::sim::knowledge::Channel;
 use crate::sim::perception::{self, WorldCache};
+use crate::sim::social::{
+    self, Bystander, CreatureIndex, Courtships, Households, RelKind, Relationships, SocialIntent,
+};
 use crate::sim::world::World;
 use rand::{Rng, SeedableRng};
 use rand_chacha::ChaCha8Rng;
@@ -69,6 +75,23 @@ pub struct TickReport {
     pub food_eaten: f32,
     pub food_spoiled: f32,
     pub discoveries: u32,
+    pub pairings: u32,
+    pub rejections: u32,
+    pub conceptions: u32,
+    pub beliefs_shared: u32,
+    pub beliefs_taught: u32,
+    pub beliefs_overheard: u32,
+    pub households_founded: u32,
+    /// Arrivals from the measurement fixture, counted separately from births.
+    /// Folding them into `births` made a held run look like a fertile one —
+    /// 4,733 "births" in a run with zero conceptions — which is exactly the
+    /// confusion the fixture's labelling exists to prevent.
+    pub settlers: u32,
+    /// Which of §4.8's requirements stopped a conception this tick, tallied by
+    /// blocker. Without this, "nobody is reproducing" is a dead end: the four
+    /// requirements fail for completely different reasons and only one of them
+    /// is ever the real one.
+    pub conception_blocked: [u32; 7],
     /// Creatures that executed a step this tick. §5.2 promises Tier 0 runs for
     /// every creature every tick, so this must always equal the population that
     /// entered phase 5 — if it does not, somebody stalled waiting for a
@@ -96,6 +119,17 @@ pub struct DecisionRecord {
     pub fallback_reason: Option<&'static str>,
 }
 
+/// One act of transmission, for the culture reports (§10): the transmission
+/// graph, teaching rate by household, and whether information hubs emerge.
+#[derive(Debug, Clone, Copy)]
+pub struct TransmissionRecord {
+    pub tick: i64,
+    pub from: i64,
+    pub to: i64,
+    pub channel: Channel,
+    pub count: u32,
+}
+
 /// A plan that ended, so `horizon_actual` and `abort_reason` can be backfilled.
 /// The gap between committed and actual is plan-abandonment, the early-warning
 /// metric for the horizon mechanic failing (§5.5).
@@ -117,6 +151,15 @@ pub struct Sim {
     pub world: World,
     pub creatures: Vec<Creature>,
     pub structures: Structures,
+    pub households: Households,
+    pub relationships: Relationships,
+    pub courtships: Courtships,
+    /// Rebuilt once at the top of every tick, so deliberation and action both
+    /// see the same population. Positions are therefore end-of-previous-tick
+    /// throughout a tick, which is a deliberate one-tick lag: it costs a
+    /// creature nothing that matters and it means adjacency cannot change
+    /// underneath a decision that was made on it.
+    pub people: CreatureIndex,
 
     pub cache: WorldCache,
     pub node_index: NodeIndex,
@@ -137,11 +180,14 @@ pub struct Sim {
 
     /// Buffers reused across ticks so a tick allocates almost nothing.
     scratch: Vec<u32>,
+    bystanders: Vec<Bystander>,
     flagged: Vec<usize>,
+    intents: Vec<SocialIntent>,
 
     pub events: Vec<Event>,
     pub decisions: Vec<DecisionRecord>,
     pub plan_outcomes: Vec<PlanOutcome>,
+    pub transmissions: Vec<TransmissionRecord>,
     pub deaths_by_cause: [u32; 7],
     pub total_births: u64,
     pub total_deaths: u64,
@@ -170,9 +216,13 @@ impl Sim {
             world_id,
             cfg,
             tick: 0,
+            people: CreatureIndex::new(world.width, world.height, 8),
             world,
             creatures: Vec::new(),
             structures: Structures::new(),
+            households: Households::new(),
+            relationships: Relationships::new(),
+            courtships: Courtships::new(),
             cache,
             node_index,
             pathfinder,
@@ -182,10 +232,13 @@ impl Sim {
             seed,
             next_creature_id: 1,
             scratch: Vec::new(),
+            bystanders: Vec::new(),
             flagged: Vec::new(),
+            intents: Vec::new(),
             events: Vec::new(),
             decisions: Vec::new(),
             plan_outcomes: Vec::new(),
+            transmissions: Vec::new(),
             deaths_by_cause: [0; 7],
             total_births: 0,
             total_deaths: 0,
@@ -307,6 +360,14 @@ impl Sim {
             exposed_ticks: 0,
             at_fire: false,
             trauma: None,
+            mate_id: None,
+            paired_tick: None,
+            pregnancy: None,
+            last_birth_tick: None,
+            children_born: 0,
+            guardian_id: None,
+            taught_count: 0,
+            shared_count: 0,
             dirty: true,
         };
 
@@ -341,6 +402,7 @@ impl Sim {
         self.events.clear();
         self.decisions.clear();
         self.plan_outcomes.clear();
+        self.transmissions.clear();
 
         let mut report = TickReport { tick: self.tick, ..Default::default() };
 
@@ -400,9 +462,22 @@ impl Sim {
                 Event::new(self.tick, EventKind::Spoiled, 0).with_num("qty", spoiled_total),
             );
         }
+        // Household stores rot too — that is the whole point of them holding
+        // batches rather than totals. A store of berries is not a reserve.
+        for h in self.households.items.iter_mut() {
+            if !h.is_alive() {
+                continue;
+            }
+            let lost = economy::spoil(&mut h.store, self.tick, &self.cfg);
+            if lost > 0.0 {
+                spoiled_total += lost;
+                h.dirty = true;
+            }
+        }
         report.food_spoiled = spoiled_total;
 
         self.node_index.rebuild(&self.world);
+        self.people.rebuild(self.creatures.iter(), self.tick, &self.cfg.knowledge);
     }
 
     /// Phase 2 — needs decay, and health's response to sustained deficit (§4.5).
@@ -633,6 +708,10 @@ impl Sim {
                     structures: &self.structures,
                     cache: &self.cache,
                     nodes: &self.node_index,
+                    people: &self.people,
+                    households: &self.households,
+                    courtships: &self.courtships,
+                    relationships: &self.relationships,
                     cfg: &self.cfg,
                     tick: self.tick,
                     night,
@@ -702,6 +781,10 @@ impl Sim {
                 night,
                 gathered: 0.0,
                 eaten: 0.0,
+                households: &mut self.households,
+                people: &self.people,
+                courtships: &self.courtships,
+                intents: &mut self.intents,
             };
 
             let c = &mut self.creatures[i];
@@ -768,8 +851,20 @@ impl Sim {
         );
     }
 
-    /// Phase 6 — resolution: deaths, and the events that record them.
+    /// Phase 6 — resolution: births, deaths, pairings, and everything else
+    /// that takes two creatures to settle.
+    ///
+    /// Order matters and is deliberate. Social acts land first, because a
+    /// creature fed this tick should not starve this tick. Then conception and
+    /// birth, then death, then the consequences of death — widowhood,
+    /// orphaning, and the inheritance of what a dissolved household held.
     fn phase_resolve(&mut self, report: &mut TickReport) {
+        self.apply_social_intents(report);
+        self.ambient_observation(report);
+        self.expire_courtships();
+        self.conceive(report);
+        self.give_birth(report);
+
         let mut dying: Vec<(usize, DeathCause)> = Vec::new();
 
         for (i, c) in self.creatures.iter().enumerate() {
@@ -823,6 +918,10 @@ impl Sim {
             self.pending_dead.extend(dead);
         }
 
+        if !dying.is_empty() {
+            self.settle_estates(report);
+        }
+
         // The measurement fixture (see `BenchConfig`): hold the census so the
         // performance and cause-of-death criteria can be measured at the stated
         // population before reproduction exists at M4.
@@ -840,7 +939,7 @@ impl Sim {
                 let age = self.cfg.lifespan.infant_until_tick as i64
                     + self.rng.gen_range(0..40);
                 let id = self.spawn_at(x, y, sex, age, 1);
-                report.births += 1;
+                report.settlers += 1;
                 if let Some(last) = self.events.last_mut() {
                     if last.actor_id == Some(id) {
                         last.kind = EventKind::Settled;
@@ -848,6 +947,531 @@ impl Sim {
                 }
             }
         }
+    }
+
+    fn index_of(&self, id: i64) -> Option<usize> {
+        self.creatures.binary_search_by_key(&id, |c| c.id).ok()
+    }
+
+    /// Apply every two-sided act recorded during phase 5.
+    fn apply_social_intents(&mut self, report: &mut TickReport) {
+        let intents = std::mem::take(&mut self.intents);
+        for intent in &intents {
+            match *intent {
+                SocialIntent::Court { from, to } => {
+                    self.courtships.offer(from, to, self.tick);
+                    // Asking is itself a small social act: it registers.
+                    self.relationships.adjust(to, from, 0.05, None, self.tick);
+                }
+
+                SocialIntent::Accept { from, to } => self.pair_up(from, to, report),
+                SocialIntent::Reject { from, to } => {
+                    self.courtships.remove_between(from, to);
+                    // Rejection is recorded (§4.8) and it costs something on
+                    // both sides — which is what makes courting a risk.
+                    self.relationships.adjust(from, to, -0.3, None, self.tick);
+                    self.relationships.adjust(to, from, -0.1, None, self.tick);
+                    report.rejections += 1;
+                    self.events.push(
+                        Event::new(self.tick, EventKind::Rejected, from).target(to),
+                    );
+                }
+
+                SocialIntent::GiveFood { from, to, quantity } => {
+                    self.transfer_food(from, to, quantity, false, report);
+                }
+                SocialIntent::FeedInfant { from, to, quantity } => {
+                    self.transfer_food(from, to, quantity, true, report);
+                }
+
+                SocialIntent::JoinHousehold { creature, household } => {
+                    self.join_household(creature, household);
+                }
+                SocialIntent::LeaveHousehold { creature } => {
+                    if let Some(i) = self.index_of(creature) {
+                        if let Some(old) = self.creatures[i].household_id.take() {
+                            self.creatures[i].dirty = true;
+                            self.events.push(
+                                Event::new(self.tick, EventKind::HouseholdLeft, creature)
+                                    .target(old),
+                            );
+                        }
+                    }
+                }
+
+                SocialIntent::Share { from, to, topic } => {
+                    let n = self.transfer_beliefs(from, to, Channel::Share, topic);
+                    if n > 0 {
+                        self.transmissions.push(TransmissionRecord {
+                            tick: self.tick, from, to, channel: Channel::Share, count: n as u32,
+                        });
+                        report.beliefs_shared += n as u32;
+                        if let Some(i) = self.index_of(from) {
+                            self.creatures[i].shared_count += 1;
+                        }
+                        // Being told something you needed is a kindness.
+                        self.relationships.adjust(to, from, 0.08, None, self.tick);
+                        self.events.push(
+                            Event::new(self.tick, EventKind::Shared, from)
+                                .target(to)
+                                .with_int("beliefs", n as i64),
+                        );
+                    }
+                }
+
+                SocialIntent::Teach { from, to } => {
+                    let n = self.transfer_beliefs(from, to, Channel::Teach, None);
+                    if n > 0 {
+                        self.transmissions.push(TransmissionRecord {
+                            tick: self.tick, from, to, channel: Channel::Teach, count: n as u32,
+                        });
+                        report.beliefs_taught += n as u32;
+                        if let Some(i) = self.index_of(from) {
+                            self.creatures[i].taught_count += 1;
+                        }
+                        self.relationships.adjust_both(from, to, 0.15, None, self.tick);
+                        self.events.push(
+                            Event::new(self.tick, EventKind::Taught, from)
+                                .target(to)
+                                .with_int("beliefs", n as i64),
+                        );
+                    }
+                }
+            }
+        }
+        self.intents = intents;
+        self.intents.clear();
+    }
+
+    /// Two creatures accept each other. §4.8's mutual pairing.
+    fn pair_up(&mut self, a: i64, b: i64, report: &mut TickReport) {
+        let (Some(ia), Some(ib)) = (self.index_of(a), self.index_of(b)) else {
+            return;
+        };
+        if self.creatures[ia].mate_id.is_some() || self.creatures[ib].mate_id.is_some() {
+            return; // somebody was quicker
+        }
+
+        self.creatures[ia].mate_id = Some(b);
+        self.creatures[ia].paired_tick = Some(self.tick);
+        self.creatures[ia].dirty = true;
+        self.creatures[ib].mate_id = Some(a);
+        self.creatures[ib].paired_tick = Some(self.tick);
+        self.creatures[ib].dirty = true;
+
+        self.courtships.remove_all_for(a);
+        self.courtships.remove_all_for(b);
+        self.relationships.adjust_both(a, b, 0.6, Some(RelKind::Mate), self.tick);
+
+        // A couple shares one household. If either already has one the other
+        // joins it; if neither does they will have to build.
+        let ha = self.creatures[ia].household_id;
+        let hb = self.creatures[ib].household_id;
+        match (ha, hb) {
+            (Some(h), None) => self.join_household(b, h),
+            (None, Some(h)) => self.join_household(a, h),
+            _ => {}
+        }
+
+        report.pairings += 1;
+        let (x, y) = (self.creatures[ia].x, self.creatures[ia].y);
+        self.events.push(Event::new(self.tick, EventKind::Paired, a).at(x, y).target(b));
+    }
+
+    fn join_household(&mut self, creature: i64, household: i64) {
+        let Some(i) = self.index_of(creature) else { return };
+        if self.creatures[i].household_id == Some(household) {
+            return;
+        }
+        let members = self.household_size(household);
+        let Some(h) = self.households.get(household) else { return };
+        if members >= h.size_cap {
+            return;
+        }
+        self.creatures[i].household_id = Some(household);
+        self.creatures[i].dirty = true;
+        self.events.push(
+            Event::new(self.tick, EventKind::HouseholdJoined, creature).target(household),
+        );
+    }
+
+    fn household_size(&self, id: i64) -> u32 {
+        self.creatures.iter().filter(|c| c.household_id == Some(id)).count() as u32
+    }
+
+    /// Move food between two creatures. Done here rather than in the action so
+    /// nothing is ever taken from a giver whose recipient has since died.
+    fn transfer_food(
+        &mut self,
+        from: i64,
+        to: i64,
+        quantity: f32,
+        to_infant: bool,
+        report: &mut TickReport,
+    ) {
+        let (Some(fi), Some(ti)) = (self.index_of(from), self.index_of(to)) else {
+            return;
+        };
+        // Oldest first, so what changes hands is what was about to spoil —
+        // which is exactly the surplus §4.4 says creates sharing pressure.
+        let Some(oldest) = self.creatures[fi].inventory.oldest_food().copied() else {
+            return;
+        };
+        let want = quantity.min(oldest.quantity);
+        let got = self.creatures[fi].inventory.take(oldest.kind, want);
+        if got <= 0.0 {
+            return;
+        }
+        self.creatures[fi].dirty = true;
+
+        if to_infant {
+            // An infant cannot carry a pack around; it is fed directly.
+            self.creatures[ti].hunger =
+                (self.creatures[ti].hunger + got * oldest.kind.nutrition()).min(100.0);
+        } else {
+            self.creatures[ti].inventory.add(oldest.kind, got, oldest.harvested_tick);
+        }
+        self.creatures[ti].dirty = true;
+
+        self.relationships.adjust(to, from, 0.2, None, self.tick);
+        self.relationships.adjust(from, to, 0.05, None, self.tick);
+
+        let (x, y) = (self.creatures[fi].x, self.creatures[fi].y);
+        self.events.push(
+            Event::new(
+                self.tick,
+                if to_infant { EventKind::FedInfant } else { EventKind::GaveFood },
+                from,
+            )
+            .at(x, y)
+            .target(to)
+            .with("kind", oldest.kind.as_str())
+            .with_num("qty", got),
+        );
+        let _ = report;
+    }
+
+    /// Copy beliefs from one creature to another over the given channel.
+    ///
+    /// Reads and writes are separate indexing operations rather than a
+    /// simultaneous borrow of two creatures, which is why this lives on `Sim`
+    /// and not in the action.
+    fn transfer_beliefs(
+        &mut self,
+        from: i64,
+        to: i64,
+        channel: Channel,
+        topic: Option<crate::sim::knowledge::BeliefKind>,
+    ) -> usize {
+        let (Some(fi), Some(ti)) = (self.index_of(from), self.index_of(to)) else {
+            return 0;
+        };
+        let k = &self.cfg.knowledge;
+        let n = match channel {
+            Channel::Teach => k.teach_belief_count,
+            Channel::Share => k.share_belief_count,
+            Channel::Observation => 1,
+        } as usize;
+
+        let (x, y) = (self.creatures[fi].x, self.creatures[fi].y);
+        let picked = knowledge::select_for_sharing(
+            &self.creatures[fi].beliefs, topic, (x, y), self.tick, k, n,
+        );
+        if picked.is_empty() {
+            return 0;
+        }
+
+        let cap = k.max_beliefs_held.max(8) as usize;
+        let mut moved = 0;
+        for i in picked {
+            let incoming = knowledge::transmit(
+                &self.creatures[fi].beliefs[i], from, channel, k, self.tick,
+            );
+            if incoming.confidence <= 0.02 {
+                continue;
+            }
+            let (tx, ty) = (self.creatures[ti].x, self.creatures[ti].y);
+            knowledge::upsert(
+                &mut self.creatures[ti].beliefs, incoming, (tx, ty), k, cap, self.tick,
+            );
+            moved += 1;
+        }
+        if moved > 0 {
+            self.creatures[ti].dirty = true;
+        }
+        moved
+    }
+
+    /// Channel 1 of §4.11: being near somebody leaks a little of what they
+    /// know. No decision, no cost, always on — an ambient information hum that
+    /// gives the world a floor of shared knowledge without anybody choosing to
+    /// communicate.
+    fn ambient_observation(&mut self, report: &mut TickReport) {
+        if !self.cfg.features.knowledge_sharing {
+            return;
+        }
+        let chance = self.cfg.knowledge.ambient_share_chance;
+        if chance <= 0.0 {
+            return;
+        }
+        let radius = self.cfg.knowledge.observation_radius.min(4);
+
+        let mut pairs: Vec<(i64, i64)> = Vec::new();
+        for c in &self.creatures {
+            if self.rng.gen::<f32>() >= chance {
+                continue;
+            }
+            self.people.near(c.x, c.y, radius, c.id, &mut self.bystanders);
+            if self.bystanders.is_empty() {
+                continue;
+            }
+            // One neighbour, chosen from the deterministic ascending-id list.
+            let pick = self.rng.gen_range(0..self.bystanders.len());
+            pairs.push((self.bystanders[pick].id, c.id));
+        }
+
+        for (from, to) in pairs {
+            let n = self.transfer_beliefs(from, to, Channel::Observation, None);
+            if n > 0 {
+                report.beliefs_overheard += n as u32;
+            }
+        }
+    }
+
+    fn expire_courtships(&mut self) {
+        let ttl = self.cfg.reproduction.courtship_offer_ticks;
+        for lapsed in self.courtships.expire(self.tick, ttl) {
+            // Being ignored is not the same as being turned down, but it is not
+            // nothing either.
+            self.relationships.adjust(lapsed.from, lapsed.to, -0.05, None, self.tick);
+        }
+    }
+
+    /// The four requirements of §4.8, checked for every paired female.
+    fn conceive(&mut self, report: &mut TickReport) {
+        let candidates: Vec<(usize, usize, i64)> = self
+            .creatures
+            .iter()
+            .enumerate()
+            .filter(|(_, c)| {
+                c.sex == Sex::Female && c.pregnancy.is_none() && c.mate_id.is_some()
+            })
+            .filter_map(|(i, c)| {
+                let mate = c.mate_id?;
+                let j = self.index_of(mate)?;
+                Some((i, j, c.household_id?))
+            })
+            .collect();
+
+        for (mi, fi, hid) in candidates {
+            let household = self.households.get(hid);
+            if let Some(blocker) = social::conception_blocker(
+                &self.creatures[mi], &self.creatures[fi], household, &self.cfg, self.tick,
+            ) {
+                report.conception_blocked[blocker as usize] += 1;
+                continue;
+            }
+
+            let due = self.tick + self.cfg.reproduction.gestation_ticks as i64;
+            let father_id = self.creatures[fi].id;
+            self.creatures[mi].pregnancy =
+                Some(crate::sim::creature::Pregnancy { father_id, due_tick: due });
+            self.creatures[mi].dirty = true;
+            report.conceptions += 1;
+
+            let (x, y) = (self.creatures[mi].x, self.creatures[mi].y);
+            self.events.push(
+                Event::new(self.tick, EventKind::Conceived, self.creatures[mi].id)
+                    .at(x, y)
+                    .target(father_id)
+                    .with_int("due", due),
+            );
+        }
+    }
+
+    /// Gestation ends. An infant is born with inherited traits and a small
+    /// mutation, and childbirth carries a real risk to the mother — which is
+    /// what makes reproduction a gamble rather than a free action (§4.8).
+    fn give_birth(&mut self, report: &mut TickReport) {
+        let due: Vec<usize> = self
+            .creatures
+            .iter()
+            .enumerate()
+            .filter(|(_, c)| c.pregnancy.is_some_and(|p| p.due_tick <= self.tick))
+            .map(|(i, _)| i)
+            .collect();
+
+        for mi in due {
+            let Some(p) = self.creatures[mi].pregnancy else { continue };
+            let mother_id = self.creatures[mi].id;
+            let (x, y) = (self.creatures[mi].x, self.creatures[mi].y);
+            let household = self.creatures[mi].household_id;
+            let generation = self.creatures[mi].generation;
+            let mother_traits = self.creatures[mi].traits;
+
+            self.creatures[mi].pregnancy = None;
+            self.creatures[mi].last_birth_tick = Some(self.tick);
+            self.creatures[mi].dirty = true;
+
+            let father_traits = self
+                .index_of(p.father_id)
+                .map(|fi| self.creatures[fi].traits)
+                .unwrap_or(mother_traits);
+
+            // A birth draws on the household store. Feeding a non-productive
+            // mouth for a week is the cost §4.7 calls deliberately harsh, and
+            // it starts on day one.
+            if let Some(h) = household.and_then(|id| self.households.get_mut(id)) {
+                let want = self.cfg.reproduction.birth_store_cost;
+                for kind in [ItemKind::Grain, ItemKind::Meat, ItemKind::Forage] {
+                    if h.store.take(kind, want) > 0.0 {
+                        break;
+                    }
+                }
+                h.dirty = true;
+            }
+
+            let sigma = self.cfg.reproduction.mutation_sigma;
+            let traits = Traits {
+                boldness: social::inherit(mother_traits.boldness, father_traits.boldness, sigma, &mut self.rng),
+                industry: social::inherit(mother_traits.industry, father_traits.industry, sigma, &mut self.rng),
+                sociability: social::inherit(mother_traits.sociability, father_traits.sociability, sigma, &mut self.rng),
+                caution: social::inherit(mother_traits.caution, father_traits.caution, sigma, &mut self.rng),
+            };
+
+            let sex = self.coin_flip_sex();
+            let child = self.spawn_at(x, y, sex, 0, generation + 1);
+            if let Some(ci) = self.index_of(child) {
+                self.creatures[ci].mother_id = Some(mother_id);
+                self.creatures[ci].father_id = Some(p.father_id);
+                self.creatures[ci].household_id = household;
+                self.creatures[ci].guardian_id = Some(mother_id);
+                self.creatures[ci].traits = traits;
+                // A newborn has seen nothing. Whatever it comes to know, it
+                // will be taught or it will find out — which is the whole
+                // question the culture layer exists to ask.
+                self.creatures[ci].beliefs.clear();
+            }
+            self.creatures[mi].children_born += 1;
+
+            self.relationships.adjust_both(mother_id, child, 0.8, Some(RelKind::Kin), self.tick);
+            self.relationships.adjust_both(p.father_id, child, 0.7, Some(RelKind::Kin), self.tick);
+            report.births += 1;
+
+            // Childbirth mortality. Applied after the child exists, so a
+            // mother who does not survive still leaves one behind.
+            if self.rng.gen::<f32>() < self.cfg.reproduction.childbirth_mortality {
+                self.creatures[mi].health = 0.0;
+                self.creatures[mi].trauma = Some((DeathCause::Childbirth, self.tick));
+            }
+        }
+    }
+
+    fn coin_flip_sex(&mut self) -> Sex {
+        if self.rng.gen::<bool>() { Sex::Female } else { Sex::Male }
+    }
+
+    /// The consequences of death: widowhood, orphaning, and what a household
+    /// leaves behind when its last member is gone.
+    fn settle_estates(&mut self, report: &mut TickReport) {
+        let dead: Vec<i64> = self.pending_dead.iter().map(|c| c.id).collect();
+
+        for id in &dead {
+            self.courtships.remove_all_for(*id);
+            for i in 0..self.creatures.len() {
+                if self.creatures[i].mate_id == Some(*id) {
+                    self.creatures[i].mate_id = None;
+                    self.creatures[i].dirty = true;
+                }
+                if self.creatures[i].guardian_id == Some(*id) {
+                    // An orphan needs somebody, or the dependency window kills
+                    // it. The household is the natural place to look — which is
+                    // exactly what a household is for.
+                    let hid = self.creatures[i].household_id;
+                    let heir = hid.and_then(|h| {
+                        self.creatures
+                            .iter()
+                            .filter(|o| {
+                                o.household_id == Some(h)
+                                    && o.life_stage != LifeStage::Infant
+                                    && o.id != self.creatures[i].id
+                            })
+                            .map(|o| o.id)
+                            .min()
+                    });
+                    self.creatures[i].guardian_id = heir;
+                    self.creatures[i].dirty = true;
+                    let orphan = self.creatures[i].id;
+                    self.events.push(
+                        Event::new(self.tick, EventKind::Orphaned, orphan)
+                            .with_int("guardian", heir.unwrap_or(0)),
+                    );
+                }
+            }
+        }
+
+        // Forget the dead. Without this the relationship set only ever grows:
+        // every creature that ever stood near another leaves an edge behind,
+        // and nobody stops being remembered. It was reaching 7,000+ edges in a
+        // 2,000-tick run, and the checkpoint that rewrites them wholesale was
+        // the tick-time spike that pushed p99 over the Fast-Forward budget.
+        {
+            let living: std::collections::BTreeSet<i64> =
+                self.creatures.iter().map(|c| c.id).collect();
+            self.relationships.forget_dead(&|id| living.contains(&id));
+        }
+
+        // Households nobody belongs to any more hand on what they held.
+        let mut counts: std::collections::BTreeMap<i64, u32> = Default::default();
+        for c in &self.creatures {
+            if let Some(h) = c.household_id {
+                *counts.entry(h).or_default() += 1;
+            }
+        }
+        for h in self.households.items.iter() {
+            counts.entry(h.id).or_insert(0);
+        }
+
+        for (hid, estate) in self.households.reap(&counts, self.tick) {
+            self.events.push(
+                Event::new(self.tick, EventKind::HouseholdDissolved, 0).target(hid),
+            );
+            // Inheritance: the store passes to the household of a child of the
+            // founders, if one survives. This is what lets a lineage compound
+            // rather than starting from nothing every generation.
+            let founders = self
+                .households
+                .items
+                .iter()
+                .find(|h| h.id == hid)
+                .map(|h| h.founder_ids);
+            let heir_household = founders.and_then(|(a, b)| {
+                self.creatures
+                    .iter()
+                    .filter(|c| {
+                        let parent = |p: Option<i64>| p == Some(a) || (b.is_some() && p == b);
+                        parent(c.mother_id) || parent(c.father_id)
+                    })
+                    .filter_map(|c| c.household_id)
+                    .filter(|h| *h != hid)
+                    .min()
+            });
+
+            if let Some(target) = heir_household {
+                if let Some(h) = self.households.get_mut(target) {
+                    for b in &estate.batches {
+                        h.store.add(b.kind, b.quantity, b.harvested_tick);
+                    }
+                    h.dirty = true;
+                    self.events.push(
+                        Event::new(self.tick, EventKind::Inherited, 0)
+                            .target(target)
+                            .with_num("qty", estate.weight()),
+                    );
+                }
+            }
+        }
+        let _ = report;
     }
 
     /// Fold the routine into counts.
@@ -943,6 +1567,24 @@ impl Sim {
         crate::db::repo::insert_decisions(&tx, self.world_id, &self.decisions)?;
         crate::db::repo::backfill_plan_outcomes(&tx, self.world_id, &self.plan_outcomes)?;
         crate::db::repo::insert_tick_stats(&tx, self.world_id, report)?;
+        crate::db::repo::insert_transmissions(&tx, self.world_id, &self.transmissions)?;
+
+        // Households first, every tick they change. `creatures.household_id` is
+        // a foreign key into them, so a creature that founded a home this tick
+        // has nothing to point at until its household has a row.
+        let dirty_households: Vec<_> = self
+            .households
+            .items
+            .iter()
+            .filter(|h| h.dirty)
+            .cloned()
+            .collect();
+        if !dirty_households.is_empty() {
+            crate::db::repo::upsert_households(&tx, self.world_id, &dirty_households)?;
+            for h in self.households.items.iter_mut() {
+                h.dirty = false;
+            }
+        }
 
         // The newly born, always: they need a row before anything can
         // reference them, and they are only a handful a tick.
@@ -990,6 +1632,9 @@ impl Sim {
             // cadence: 600 rows deleted and reinserted every 24 ticks was pure
             // spike for state that only has to be right when a run is resumed.
             crate::db::repo::save_resource_nodes(&tx, self.world_id, &self.world)?;
+            crate::db::repo::save_relationships(&tx, self.world_id, &self.relationships)?;
+            crate::db::repo::save_courtships(&tx, self.world_id, &self.courtships)?;
+            crate::db::repo::upsert_households(&tx, self.world_id, &self.households.items)?;
         }
 
         tx.commit()?;
@@ -1017,6 +1662,9 @@ impl Sim {
         crate::db::repo::load_beliefs_into(conn, self.world_id, &mut creatures)?;
         self.creatures = creatures;
         self.structures = crate::db::repo::load_structures(conn, self.world_id)?;
+        self.households = crate::db::repo::load_households(conn, self.world_id)?;
+        self.relationships = crate::db::repo::load_relationships(conn, self.world_id)?;
+        self.courtships = crate::db::repo::load_courtships(conn, self.world_id)?;
         self.next_creature_id = crate::db::repo::next_creature_id(conn, self.world_id)?;
 
         // Occupancy is derived rather than stored: it is a fact about who is
@@ -1039,6 +1687,7 @@ impl Sim {
         self.tick = tick;
         self.rng = tick_rng(self.seed, tick);
         self.node_index.rebuild(&self.world);
+        self.people.rebuild(self.creatures.iter(), tick, &self.cfg.knowledge);
         Ok(())
     }
 
@@ -1061,10 +1710,26 @@ impl Sim {
             c.beliefs.len().hash(&mut h);
             c.inventory.weight().to_bits().hash(&mut h);
         }
+        for c in &self.creatures {
+            c.household_id.hash(&mut h);
+            c.mate_id.hash(&mut h);
+            c.generation.hash(&mut h);
+            c.pregnancy.map(|p| (p.father_id, p.due_tick)).hash(&mut h);
+        }
         for n in &self.world.nodes {
             n.x.hash(&mut h);
             n.y.hash(&mut h);
             n.quantity.to_bits().hash(&mut h);
+        }
+        for hh in &self.households.items {
+            hh.id.hash(&mut h);
+            hh.dissolved_tick.hash(&mut h);
+            hh.store.weight().to_bits().hash(&mut h);
+        }
+        for ((a, b), e) in self.relationships.iter() {
+            a.hash(&mut h);
+            b.hash(&mut h);
+            e.affinity.to_bits().hash(&mut h);
         }
         self.deaths_by_cause.hash(&mut h);
         h.finish()
@@ -1315,15 +1980,291 @@ mod tests {
         );
     }
 
+    // ------------------------------------------------------------- society
+
+    /// Put two healthy adults next to each other with a stocked household, so
+    /// the four requirements of §4.8 can be exercised one at a time.
+    fn couple_at_home(sim: &mut Sim, food: f32) -> (i64, i64, i64) {
+        let a = sim.spawn_at(20, 20, Sex::Female, 200, 1);
+        let b = sim.spawn_at(20, 21, Sex::Male, 200, 1);
+        let shelter = sim.structures.add(crate::sim::economy::Structure {
+            id: 0,
+            kind: crate::sim::economy::StructureKind::Shelter,
+            x: 20, y: 20, condition: 1.0, capacity: 6, occupants: 0,
+            household_id: None, built_tick: 0, fuel_remaining: 0.0,
+            lit_until_tick: None, dirty: false,
+        });
+        let cfg = sim.cfg.clone();
+        let h = sim.households.found(Some(shelter), a, Some(b), 0, &cfg);
+        sim.households.get_mut(h).unwrap().store.add(ItemKind::Grain, food, 0);
+        for id in [a, b] {
+            let i = sim.index_of(id).unwrap();
+            sim.creatures[i].household_id = Some(h);
+            sim.creatures[i].health = 100.0;
+        }
+        (a, b, h)
+    }
+
+    fn marry(sim: &mut Sim, a: i64, b: i64) {
+        let (ia, ib) = (sim.index_of(a).unwrap(), sim.index_of(b).unwrap());
+        sim.creatures[ia].mate_id = Some(b);
+        sim.creatures[ib].mate_id = Some(a);
+    }
+
     #[test]
-    fn the_population_fixture_holds_the_census_and_says_so() {
+    fn a_paired_couple_with_a_stocked_household_conceives_and_gives_birth() {
+        let cfg = small_cfg();
+        let world = worldgen::generate(44127, &cfg).world;
+        let mut sim = Sim::new(1, world, cfg.clone(), 44127);
+        let (a, b, _) = couple_at_home(&mut sim, cfg.reproduction.store_reserve + 20.0);
+        marry(&mut sim, a, b);
+
+        let before = sim.alive();
+        let mut conceived = false;
+        let mut born_blank = None;
+        for _ in 0..(cfg.reproduction.gestation_ticks + 40) {
+            // Keep them fed and watered; this test is about §4.8, not survival.
+            for c in sim.creatures.iter_mut() {
+                c.hunger = 100.0;
+                c.thirst = 100.0;
+                c.warmth = 100.0;
+                c.health = 100.0;
+            }
+            let r = sim.step();
+            conceived |= r.conceptions > 0;
+            if born_blank.is_none() {
+                if let Some(child) = sim.creatures.iter().find(|c| c.generation == 2) {
+                    // Checked on the tick it arrives: from the next one it is
+                    // already picking things up ambiently, which is §4.11
+                    // channel 1 working as intended.
+                    born_blank = Some(child.beliefs.is_empty());
+                }
+            }
+        }
+
+        assert!(conceived, "the four requirements were met and nothing happened");
+        assert!(sim.alive() > before, "a child should have arrived");
+        let child = sim.creatures.iter().find(|c| c.generation == 2).expect("a second generation");
+        assert_eq!(child.mother_id, Some(a));
+        assert_eq!(child.father_id, Some(b));
+        assert_eq!(child.life_stage, LifeStage::Infant);
+        // Nothing is inherited but traits. Knowledge has to be taught or found,
+        // or it dies with whoever held it — which is the whole reason the
+        // culture layer exists.
+        assert_eq!(born_blank, Some(true), "a newborn is born knowing nothing at all");
+        assert_eq!(child.guardian_id, Some(a), "and has somebody to follow");
+    }
+
+    #[test]
+    fn an_empty_store_is_the_thing_that_stops_a_lineage() {
+        // §4.4 and §4.8 together: only grain keeps, and only a household above
+        // the reserve may have a child. A couple with everything else in place
+        // and nothing put by is the case this whole economy is built around.
+        let cfg = small_cfg();
+        let world = worldgen::generate(44127, &cfg).world;
+        let mut sim = Sim::new(1, world, cfg.clone(), 44127);
+        let (a, b, _) = couple_at_home(&mut sim, 0.0);
+        marry(&mut sim, a, b);
+
+        let mut blocked = 0;
+        for _ in 0..60 {
+            for c in sim.creatures.iter_mut() {
+                c.hunger = 100.0;
+                c.thirst = 100.0;
+                c.health = 100.0;
+            }
+            let r = sim.step();
+            assert_eq!(r.conceptions, 0, "no store, no child");
+            blocked += r.conception_blocked[social::Blocker::StoreShort as usize];
+        }
+        assert!(blocked > 0, "and the reason is recorded, not merely implied");
+    }
+
+    #[test]
+    fn a_child_inherits_from_both_parents() {
+        let cfg = small_cfg();
+        let world = worldgen::generate(44127, &cfg).world;
+        let mut sim = Sim::new(1, world, cfg.clone(), 44127);
+        let (a, b, _) = couple_at_home(&mut sim, 400.0);
+        marry(&mut sim, a, b);
+
+        // Push the parents to opposite extremes so inheritance is visible.
+        let ia = sim.index_of(a).unwrap();
+        sim.creatures[ia].traits.industry = 0.05;
+        let ib = sim.index_of(b).unwrap();
+        sim.creatures[ib].traits.industry = 0.95;
+
+        for _ in 0..(cfg.reproduction.gestation_ticks + 40) {
+            for c in sim.creatures.iter_mut() {
+                c.hunger = 100.0;
+                c.thirst = 100.0;
+                c.warmth = 100.0;
+                c.health = 100.0;
+            }
+            sim.step();
+        }
+
+        let child = sim.creatures.iter().find(|c| c.generation == 2).expect("a child");
+        assert!(
+            (0.2..0.8).contains(&child.traits.industry),
+            "should land between its parents, got {}",
+            child.traits.industry
+        );
+    }
+
+    #[test]
+    fn an_infant_with_no_guardian_and_nobody_to_feed_it_dies() {
+        // The dependency window §4.7 calls deliberately harsh. An infant cannot
+        // gather; without somebody feeding it, it starves.
+        let cfg = small_cfg();
+        let world = worldgen::generate(44127, &cfg).world;
+        let mut sim = Sim::new(1, world, cfg, 44127);
+        sim.spawn_at(20, 20, Sex::Female, 0, 2);
+
+        for _ in 0..400 {
+            sim.step();
+            if sim.alive() == 0 {
+                break;
+            }
+        }
+        assert_eq!(sim.alive(), 0, "an unfed infant cannot survive alone");
+        // Thirst decays faster than hunger (§4.5), and an infant can no more
+        // fetch water than it can forage — so it is usually thirst that takes
+        // it first. Either way it is neglect, and either way it is recorded.
+        let neglect = sim.deaths_by_cause[DeathCause::Starvation as usize]
+            + sim.deaths_by_cause[DeathCause::Dehydration as usize];
+        assert!(neglect > 0, "cause of death: {:?}", sim.deaths_by_cause);
+    }
+
+    #[test]
+    fn teaching_hands_over_knowledge_as_though_the_pupil_had_seen_it() {
+        use crate::sim::knowledge::{Belief, BeliefKind, Estimate};
+        let cfg = small_cfg();
+        let world = worldgen::generate(44127, &cfg).world;
+        let mut sim = Sim::new(1, world, cfg, 44127);
+        let teacher = sim.spawn_at(20, 20, Sex::Female, 300, 1);
+        let pupil = sim.spawn_at(20, 21, Sex::Male, 170, 2);
+
+        let ti = sim.index_of(teacher).unwrap();
+        sim.creatures[ti].beliefs.push(Belief {
+            kind: BeliefKind::SoilPatch,
+            x: 44, y: 44,
+            estimate: Estimate::Plentiful,
+            confidence: 1.0,
+            learned_tick: 0,
+            last_verified_tick: 0,
+            source_creature_id: None,
+            hops: 0,
+            origin_creature_id: Some(teacher),
+            origin_tick: 0,
+        });
+        let pi = sim.index_of(pupil).unwrap();
+        sim.creatures[pi].beliefs.clear();
+
+        let n = sim.transfer_beliefs(teacher, pupil, Channel::Teach, None);
+
+        assert!(n > 0, "nothing was handed over");
+        let learned = &sim.creatures[sim.index_of(pupil).unwrap()].beliefs;
+        let b = learned.iter().find(|b| b.kind == BeliefKind::SoilPatch).expect("taught it");
+        assert_eq!(b.hops, 0, "taught knowledge arrives as though firsthand");
+        assert_eq!(
+            b.origin_creature_id,
+            Some(teacher),
+            "and still credits whoever actually found the place — this is S7's column"
+        );
+    }
+
+    #[test]
+    fn a_household_that_loses_everybody_passes_its_store_to_a_child() {
+        // Inheritance (§4.10). Without it, death destroys grain — and grain is
+        // the entire reproduction economy.
+        let cfg = small_cfg();
+        let world = worldgen::generate(44127, &cfg).world;
+        let mut sim = Sim::new(1, world, cfg.clone(), 44127);
+        let (a, b, parents_home) = couple_at_home(&mut sim, 50.0);
+
+        // A grown child with a household of its own.
+        let child = sim.spawn_at(30, 30, Sex::Female, 300, 2);
+        let ci = sim.index_of(child).unwrap();
+        sim.creatures[ci].mother_id = Some(a);
+        sim.creatures[ci].father_id = Some(b);
+        let childs_home = sim.households.found(Some(1), child, None, 0, &cfg);
+        sim.creatures[ci].household_id = Some(childs_home);
+
+        // Both parents die.
+        for id in [a, b] {
+            let i = sim.index_of(id).unwrap();
+            sim.creatures[i].health = 0.0;
+            sim.creatures[i].hunger = 0.0;
+        }
+        let mut report = TickReport::default();
+        sim.phase_resolve(&mut report);
+
+        assert!(sim.households.get(parents_home).is_none(), "the old household is gone");
+        let inherited = sim.households.get(childs_home).unwrap().stored_food();
+        assert!(inherited > 0.0, "the store should have passed on, got {inherited}");
+    }
+
+    #[test]
+    fn a_courtship_can_be_refused_and_the_refusal_is_recorded() {
+        let cfg = small_cfg();
+        let world = worldgen::generate(44127, &cfg).world;
+        let mut sim = Sim::new(1, world, cfg, 44127);
+        let a = sim.spawn_at(20, 20, Sex::Female, 200, 1);
+        let b = sim.spawn_at(20, 21, Sex::Male, 200, 1);
+
+        sim.intents.push(SocialIntent::Court { from: b, to: a });
+        let mut report = TickReport::default();
+        sim.apply_social_intents(&mut report);
+        assert!(sim.courtships.pending_for(a).is_some(), "the question was put");
+
+        sim.intents.push(SocialIntent::Reject { from: b, to: a });
+        let mut report = TickReport::default();
+        sim.apply_social_intents(&mut report);
+
+        assert_eq!(report.rejections, 1);
+        assert!(sim.courtships.pending_for(a).is_none());
+        assert!(sim.relationships.get(b, a) < 0.0, "being turned down costs something");
+        assert!(sim.creature(a).unwrap().mate_id.is_none());
+    }
+
+    #[test]
+    fn pairing_is_mutual_and_puts_both_in_one_household() {
+        let cfg = small_cfg();
+        let world = worldgen::generate(44127, &cfg).world;
+        let mut sim = Sim::new(1, world, cfg.clone(), 44127);
+        let a = sim.spawn_at(20, 20, Sex::Female, 200, 1);
+        let b = sim.spawn_at(20, 21, Sex::Male, 200, 1);
+        let h = sim.households.found(Some(1), a, None, 0, &cfg);
+        let ia = sim.index_of(a).unwrap();
+        sim.creatures[ia].household_id = Some(h);
+
+        sim.intents.push(SocialIntent::Accept { from: a, to: b });
+        let mut report = TickReport::default();
+        sim.apply_social_intents(&mut report);
+
+        assert_eq!(report.pairings, 1);
+        assert_eq!(sim.creature(a).unwrap().mate_id, Some(b));
+        assert_eq!(sim.creature(b).unwrap().mate_id, Some(a), "pairing is two-sided");
+        assert_eq!(
+            sim.creature(b).unwrap().household_id,
+            Some(h),
+            "a couple shares one household"
+        );
+    }
+
+    #[test]
+    fn the_population_fixture_is_a_floor_not_a_cap() {
+        // It exists so performance can be measured at a stated population. Now
+        // that creatures reproduce it must not *stop* them: it tops the census
+        // up when death outpaces birth and otherwise gets out of the way.
         let mut cfg = small_cfg();
         cfg.bench.maintain_population = Some(50);
         let mut sim = sim_with(44127, 50, cfg);
         for _ in 0..300 {
             sim.step();
         }
-        assert_eq!(sim.alive(), 50);
+        assert!(sim.alive() >= 50, "the floor holds: {}", sim.alive());
         assert!(sim.population_maintained, "a held run must be labelled as one");
     }
 }

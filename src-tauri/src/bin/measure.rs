@@ -166,9 +166,53 @@ fn nearest_water_distance(world: &World, x: u32, y: u32) -> u32 {
 
 fn run_report(seed: u64, creatures: u32, ticks: i64) {
     let mut cfg = WorldConfig::default();
-    // Reproduction is M4. Holding the census is the only way to measure the
-    // stated criterion — 500 creatures, <50ms/tick — before it exists.
-    cfg.bench.maintain_population = Some(creatures);
+    // Creatures reproduce now, so the census is emergent and the fixture is
+    // only a floor for the performance measurement — and only when asked for:
+    //   measure run <seed> <creatures> <ticks> hold
+    let hold = std::env::args().nth(5).is_some_and(|a| a == "hold");
+    if hold {
+        cfg.bench.maintain_population = Some(creatures);
+    }
+
+    // Dial overrides, so the balance questions §13.1 lists can be answered by
+    // experiment rather than by rebuilding: "if M4 shows lineages consistently
+    // dying at generation 2, the dials in order are infant duration, the
+    // reserve threshold, then grain yield per harvest."
+    let dial = |name: &str| std::env::var(name).ok().and_then(|v| v.parse::<f32>().ok());
+    if let Some(v) = dial("LZ_RESERVE") {
+        cfg.reproduction.store_reserve = v;
+    }
+    if let Some(v) = dial("LZ_INFANT") {
+        cfg.lifespan.infant_until_tick = v as u32;
+    }
+    if let Some(v) = dial("LZ_SPACING") {
+        cfg.reproduction.birth_spacing_ticks = v as u32;
+    }
+    if let Some(v) = dial("LZ_WHEAT_YIELD") {
+        cfg.actions.harvest_wheat_per_tick = v;
+    }
+    if let Some(v) = dial("LZ_SOIL") {
+        cfg.resources.soil_density = v;
+    }
+    if let Some(v) = dial("LZ_ELDER") {
+        cfg.lifespan.elder_from_tick = v as u32;
+    }
+    if let Some(v) = dial("LZ_SHELTER_COST") {
+        cfg.actions.shelter_wood_cost = v;
+    }
+    if let Some(v) = dial("LZ_GESTATION") {
+        cfg.reproduction.gestation_ticks = v as u32;
+    }
+    println!(
+        "dials: reserve {:.0}, infancy {}, spacing {}, wheat yield {:.1}, soil {:.3}, \
+         elder {}",
+        cfg.reproduction.store_reserve,
+        cfg.lifespan.infant_until_tick,
+        cfg.reproduction.birth_spacing_ticks,
+        cfg.actions.harvest_wheat_per_tick,
+        cfg.resources.soil_density,
+        cfg.lifespan.elder_from_tick,
+    );
 
     let world = worldgen::generate(seed, &cfg).world;
 
@@ -184,10 +228,19 @@ fn run_report(seed: u64, creatures: u32, ticks: i64) {
     life_zone_lib::db::repo::save_world(&mut conn, 1, &world).expect("save world");
 
     let mut sim = Sim::new(1, world, cfg.clone(), seed);
-    sim.spawn_population(creatures);
+    if creatures == 0 {
+        sim.spawn_founders();
+    } else {
+        sim.spawn_population(creatures);
+    }
 
-    println!("== RUN seed {seed}, {creatures} creatures, {ticks} ticks ==");
-    println!("population held by the M2 benchmark fixture (no reproduction until M4)");
+    println!("== RUN seed {seed}, {} creatures, {ticks} ticks ==",
+             if creatures == 0 { sim.alive() as u32 } else { creatures });
+    if hold {
+        println!("census floored by the benchmark fixture (settlers replace the dead)");
+    } else {
+        println!("population is emergent — no fixture");
+    }
     println!("persisting to {}\n", db_path.display());
 
     let mut tick_us: Vec<u64> = Vec::with_capacity(ticks as usize);
@@ -207,6 +260,23 @@ fn run_report(seed: u64, creatures: u32, ticks: i64) {
     let mut horizon_committed = 0u64;
     let mut horizon_actual = 0u64;
     let mut planted = 0u64;
+    let mut pairings = 0u64;
+    let mut rejections = 0u64;
+    let mut conceptions = 0u64;
+    let mut births = 0u64;
+    let mut settlers = 0u64;
+    let mut shared = 0u64;
+    let mut taught = 0u64;
+    let mut overheard = 0u64;
+    let mut households_founded = 0u64;
+    let mut blocked = [0u64; 7];
+    let mut grain_gathered = 0.0f64;
+    let mut forage_gathered = 0.0f64;
+    let mut max_generation = 0i32;
+    // Everybody who has ever lived, so S7 can ask whether the beliefs still in
+    // circulation came from somebody who is dead.
+    let mut ever_lived: std::collections::BTreeSet<i64> = Default::default();
+    let mut gen_curve: Vec<(i64, i32, usize, usize)> = Vec::new();
     let mut shelters_built = 0u64;
     let mut fires_lit = 0u64;
 
@@ -227,6 +297,26 @@ fn run_report(seed: u64, creatures: u32, ticks: i64) {
         phase[6] += r.timings.persist;
 
         abandoned += r.plans_abandoned;
+        pairings += r.pairings as u64;
+        rejections += r.rejections as u64;
+        conceptions += r.conceptions as u64;
+        births += r.births as u64;
+        settlers += r.settlers as u64;
+        for (i, n) in r.conception_blocked.iter().enumerate() {
+            blocked[i] += *n as u64;
+        }
+        shared += r.beliefs_shared as u64;
+        taught += r.beliefs_taught as u64;
+        overheard += r.beliefs_overheard as u64;
+        for e in &sim.events {
+            if e.kind == life_zone_lib::sim::event::EventKind::HouseholdFounded {
+                households_founded += 1;
+            }
+        }
+        for c in &sim.creatures {
+            ever_lived.insert(c.id);
+            max_generation = max_generation.max(c.generation);
+        }
         deliberations += r.deliberations as u64;
         gathered += r.food_gathered as f64;
         eaten += r.food_eaten as f64;
@@ -246,6 +336,22 @@ fn run_report(seed: u64, creatures: u32, ticks: i64) {
         for e in &sim.events {
             *event_counts.entry(e.kind.as_str()).or_default() += 1;
             match e.kind {
+                life_zone_lib::sim::event::EventKind::Harvested => {
+                    if let Some(q) = e.payload.split("qty=").nth(1)
+                        .and_then(|t| t.split_whitespace().next())
+                        .and_then(|t| t.parse::<f64>().ok())
+                    {
+                        grain_gathered += q;
+                    }
+                }
+                life_zone_lib::sim::event::EventKind::Gathered => {
+                    if let Some(q) = e.payload.split("qty=").nth(1)
+                        .and_then(|t| t.split_whitespace().next())
+                        .and_then(|t| t.parse::<f64>().ok())
+                    {
+                        forage_gathered += q;
+                    }
+                }
                 life_zone_lib::sim::event::EventKind::Planted => planted += 1,
                 life_zone_lib::sim::event::EventKind::ShelterBuilt => shelters_built += 1,
                 life_zone_lib::sim::event::EventKind::FireLit => fires_lit += 1,
@@ -255,6 +361,10 @@ fn run_report(seed: u64, creatures: u32, ticks: i64) {
 
         if t % 100 == 0 {
             pop_curve.push((t, sim.alive()));
+        }
+        if t % 200 == 0 {
+            let households = sim.households.items.iter().filter(|h| h.is_alive()).count();
+            gen_curve.push((t, max_generation, sim.alive(), households));
         }
         if t % 250 == 0 && t > 0 {
             let n = sim.alive().max(1) as f32;
@@ -283,6 +393,42 @@ fn run_report(seed: u64, creatures: u32, ticks: i64) {
                 .map(|c| water_distance(&sim, c.x, c.y))
                 .sum::<u32>() as f32
                 / n;
+            let stores: Vec<f32> = sim.households.items.iter()
+                .filter(|h| h.is_alive()).map(|h| h.stored_food()).collect();
+            let grain: f32 = sim.households.items.iter()
+                .filter(|h| h.is_alive())
+                .map(|h| h.store.total(ItemKind::Grain)).sum();
+            if !stores.is_empty() {
+                println!(
+                    "         households {:3}  store mean {:5.1}  grain held {:6.1}  \
+                     at reserve {}",
+                    stores.len(),
+                    stores.iter().sum::<f32>() / stores.len() as f32,
+                    grain,
+                    stores.iter().filter(|s| **s >= cfg.reproduction.store_reserve).count(),
+                );
+            }
+            let paired = sim.creatures.iter().filter(|c| c.mate_id.is_some()).count();
+            let homeless_paired: Vec<&life_zone_lib::sim::creature::Creature> = sim
+                .creatures
+                .iter()
+                .filter(|c| c.mate_id.is_some() && c.household_id.is_none())
+                .collect();
+            let wood_hp = if homeless_paired.is_empty() {
+                0.0
+            } else {
+                homeless_paired
+                    .iter()
+                    .map(|c| c.inventory.total(ItemKind::Wood))
+                    .sum::<f32>()
+                    / homeless_paired.len() as f32
+            };
+            println!(
+                "         paired {paired:3}  of whom homeless {:3}  carrying {wood_hp:4.1} wood \
+                 (a shelter costs {:.0})",
+                homeless_paired.len(),
+                cfg.actions.shelter_wood_cost,
+            );
             let stock = |k: NodeKind| -> f32 {
                 sim.world.nodes.iter().filter(|n| n.kind == k).map(|n| n.quantity).sum()
             };
@@ -366,6 +512,7 @@ fn run_report(seed: u64, creatures: u32, ticks: i64) {
     println!("  food eaten    {eaten:12.0}");
     println!("  food spoiled  {spoiled:12.0}  ({:.1}% of what was gathered)",
              if gathered > 0.0 { spoiled * 100.0 / gathered } else { 0.0 });
+    println!("  grain harvested {grain_gathered:10.0}   forage picked {forage_gathered:.0}");
     println!("  wheat planted {planted:12}   shelters {shelters_built}   fires lit {fires_lit}");
     println!("  structures standing at the end: {}", sim.structures.items.len());
 
@@ -435,6 +582,87 @@ fn run_report(seed: u64, creatures: u32, ticks: i64) {
         .flat_map(|c| c.beliefs.iter())
         .filter(|b| b.is_firsthand())
         .count();
+    // ---- society -----------------------------------------------------------
+    println!("\n-- society over the run --");
+    println!("  households founded {households_founded}");
+    println!("  standing at the end {}",
+             sim.households.items.iter().filter(|h| h.is_alive()).count());
+    println!("  courtships accepted {pairings}, refused {rejections}  ({:.0}% refused)",
+             pct(rejections as usize, (pairings + rejections) as usize));
+    println!("  conceptions {conceptions}, births {births}");
+    if settlers > 0 {
+        println!("  settlers admitted by the fixture {settlers} (not births)");
+    }
+    let blocked_total: u64 = blocked.iter().sum();
+    if blocked_total > 0 {
+        println!("  what stopped the rest ({blocked_total} paired-couple ticks):");
+        let mut rows: Vec<(&str, u64)> = life_zone_lib::sim::social::Blocker::ALL
+            .iter()
+            .map(|b| (b.as_str(), blocked[*b as usize]))
+            .filter(|(_, n)| *n > 0)
+            .collect();
+        rows.sort_by(|a, b| b.1.cmp(&a.1));
+        for (name, n) in rows {
+            println!("    {name:28} {n:>8}  {:5.1}%", pct(n as usize, blocked_total as usize));
+        }
+    }
+    println!("  relationships tracked {}", sim.relationships.len());
+
+    println!("\n-- lineage (the point of the whole thing) --");
+    println!("  deepest generation reached: {max_generation}");
+    let mut by_gen: BTreeMap<i32, usize> = BTreeMap::new();
+    for c in &sim.creatures {
+        *by_gen.entry(c.generation).or_default() += 1;
+    }
+    for (g, n) in &by_gen {
+        println!("    generation {g:>2}  {n:>5} alive");
+    }
+    let stores: Vec<f32> = sim
+        .households
+        .items
+        .iter()
+        .filter(|h| h.is_alive())
+        .map(|h| h.stored_food())
+        .collect();
+    if !stores.is_empty() {
+        let mean = stores.iter().sum::<f32>() / stores.len() as f32;
+        let at_reserve = stores.iter().filter(|s| **s >= cfg.reproduction.store_reserve).count();
+        println!("  household stores: mean {mean:.1}, {at_reserve} of {} at or above the \
+                  {:.0} reserve", stores.len(), cfg.reproduction.store_reserve);
+    }
+
+    println!("\n-- transmission (§4.11) --");
+    println!("  beliefs taught     {taught}");
+    println!("  beliefs shared     {shared}");
+    println!("  beliefs overheard  {overheard}");
+    let teachers = sim.creatures.iter().filter(|c| c.taught_count > 0).count();
+    let sharers = sim.creatures.iter().filter(|c| c.shared_count > 0).count();
+    println!("  of the living, {:.0}% have taught somebody, {:.0}% have shared",
+             pct(teachers, sim.alive()), pct(sharers, sim.alive()));
+
+    // S7: does knowledge outlive the creature that found it?
+    let living: std::collections::BTreeSet<i64> = sim.creatures.iter().map(|c| c.id).collect();
+    let (mut inherited, mut total_beliefs) = (0usize, 0usize);
+    for c in &sim.creatures {
+        for b in &c.beliefs {
+            total_beliefs += 1;
+            if let Some(origin) = b.origin_creature_id {
+                if origin != c.id && !living.contains(&origin) {
+                    inherited += 1;
+                }
+            }
+        }
+    }
+    println!("\n-- S7: knowledge outliving its discoverer --");
+    println!("  beliefs in circulation      {total_beliefs}");
+    println!("  originating with the dead   {inherited}  ({:.1}%)",
+             pct(inherited, total_beliefs));
+
+    println!("\n-- generation and household curve --");
+    for (t, g, alive, h) in gen_curve.iter().step_by(4) {
+        println!("  tick {t:>6}  gen {g:>2}  alive {alive:>5}  households {h:>4}");
+    }
+
     println!("\n-- knowledge at the end --");
     println!("  beliefs held      {beliefs} across {} living creatures", sim.alive());
     println!("  mean per creature {:.1}", beliefs as f64 / sim.alive().max(1) as f64);

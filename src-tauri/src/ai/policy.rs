@@ -31,6 +31,7 @@ use crate::sim::actions::{Goal, Step, Target};
 use crate::sim::creature::{Addresses, Creature, ItemKind, LifeStage, Plan};
 use crate::sim::economy::{self, NodeIndex, Structures};
 use crate::sim::knowledge::{self, BeliefKind, NeedProfile};
+use crate::sim::social::{Bystander, CreatureIndex, Courtships, Households, Relationships};
 use crate::sim::perception::WorldCache;
 use crate::sim::terrain::Terrain;
 use crate::sim::world::{NodeKind, World};
@@ -42,9 +43,22 @@ pub struct PolicyCtx<'a> {
     pub structures: &'a Structures,
     pub cache: &'a WorldCache,
     pub nodes: &'a NodeIndex,
+    pub people: &'a CreatureIndex,
+    pub households: &'a Households,
+    pub courtships: &'a Courtships,
+    pub relationships: &'a Relationships,
     pub cfg: &'a WorldConfig,
     pub tick: i64,
     pub night: bool,
+}
+
+impl PolicyCtx<'_> {
+    /// Where this creature's household keeps its store, if it has one.
+    fn hearth(&self, c: &Creature) -> Option<(i64, u32, u32)> {
+        let h = self.households.get(c.household_id?)?;
+        let s = self.structures.get(h.shelter_id?)?;
+        Some((h.id, s.x, s.y))
+    }
 }
 
 /// How badly a need wants attention. Zero when satisfied, rising sharply once
@@ -113,7 +127,13 @@ fn need_profile(c: &Creature, ctx: &PolicyCtx) -> NeedProfile {
     // carrying a night's fuel still reads as short of it, goes looking for
     // wood it does not need, and — because it has no wood-node belief — ends up
     // exploring instead of lighting the fire it could light where it stands.
-    let sheltered_soon = ctx.structures.nearest_shelter(c.x, c.y, 12).is_some();
+    // Having a *home*, not a bed for tonight. The same distinction that
+    // decides whether a creature builds decides how much timber it wants: with
+    // the occupancy test here, any shelter with a spare bed within twelve tiles
+    // dropped the target from a shelter's worth of wood to a night's fire, so a
+    // couple that wanted a house of their own never carried enough to raise
+    // one. Measured: 77 courtships, 11 households.
+    let sheltered_soon = ctx.hearth(c).is_some();
     let night_pressure = if ctx.night { 1.0 } else { night_proximity(ctx) };
     //
     // How much wood is enough depends on what it is *for*. With a roof in
@@ -123,7 +143,16 @@ fn need_profile(c: &Creature, ctx: &PolicyCtx) -> NeedProfile {
     let night_len = (24 + ctx.cfg.actions.night_end_hour - ctx.cfg.actions.night_start_hour) % 24;
     let a_nights_fire =
         ctx.cfg.resources.fire_fuel_burn_per_tick * night_len as f32 + ctx.cfg.actions.fire_wood_cost;
-    let target = if sheltered_soon { a_nights_fire } else { ctx.cfg.actions.shelter_wood_cost };
+    // A creature with no home needs the timber for one *and* the fire to
+    // survive the nights until it is built. Aiming only at the shelter cost is
+    // a trap: the night always comes first, the wood goes on the fire, and the
+    // house is never started. Measured: 40 of 50 paired creatures homeless,
+    // carrying a mean of 1.9 wood against a 12-wood shelter, indefinitely.
+    let target = if sheltered_soon {
+        a_nights_fire
+    } else {
+        ctx.cfg.actions.shelter_wood_cost + a_nights_fire
+    };
     let short_by = ((target - c.inventory.total(ItemKind::Wood)) / target.max(1.0)).clamp(0.0, 1.0);
 
     // Wanted through the whole day, not only as it gets dark: a creature that
@@ -226,9 +255,24 @@ pub fn decide(c: &Creature, ctx: &PolicyCtx, rng: &mut ChaCha8Rng) -> Plan {
         if c.inventory.total_food() > 0.0 && c.hunger < 70.0 {
             steps.push(Step::new(Goal::EatFromInventory, Target::None, 1));
         }
-        steps.push(Step::new(Goal::Rest, Target::None, 6));
-        return finish(c, ctx, steps, "Too small to do anything but wait.".into(), 1.0,
-                      Addresses::Rest);
+        // Staying with whoever is keeping you alive is the only meaningful
+        // thing an infant can do. If the guardian is gone it has nothing left
+        // but to wait, which is the dependency window doing what §4.7 says it
+        // does.
+        if let Some(g) = c.guardian_id.filter(|g| ctx.people.get(*g).is_some()) {
+            steps.push(Step::new(Goal::Follow, Target::Creature(g), 12));
+        } else {
+            steps.push(Step::new(Goal::Rest, Target::None, 6));
+        }
+        return finish(
+            c, ctx, steps,
+            if c.guardian_id.is_some() {
+                "Stay close.".into()
+            } else {
+                "Nobody is coming.".into()
+            },
+            1.0, Addresses::Rest,
+        );
     }
 
     // ---- eat what you already carry: instant, free, and usually right -------
@@ -281,7 +325,7 @@ pub fn decide(c: &Creature, ctx: &PolicyCtx, rng: &mut ChaCha8Rng) -> Plan {
     }
 
     // ---- go and get food ---------------------------------------------------
-    if let Some(cand) = food_run(c, ctx, &needs) {
+    if let Some(cand) = food_run(c, ctx) {
         offer(cand);
     }
 
@@ -298,7 +342,16 @@ pub fn decide(c: &Creature, ctx: &PolicyCtx, rng: &mut ChaCha8Rng) -> Plan {
             if let Some(node) = find_node(ctx, NodeKind::Wood, b.x, b.y) {
                 let t = travel_ticks(c, ctx.cfg, (b.x, b.y));
                 // Industry is a taste for long-horizon work over immediate gain.
-                let drive = 0.55 + 0.75 * c.traits.industry;
+                // Wanting timber is not the same as wanting fuel. A homeless
+                // creature is gathering to *build*, and a homeless paired one
+                // has §4.8 telling it that nothing else it wants is possible
+                // until it does.
+                let building = match (ctx.hearth(c).is_none(), c.is_paired()) {
+                    (true, true) => 2.4,
+                    (true, false) => 1.5,
+                    _ => 1.0,
+                };
+                let drive = (0.55 + 0.75 * c.traits.industry) * building;
                 offer(Candidate {
                     score: needs.fuel * quality * 2.6 * drive,
                     steps: vec![
@@ -325,21 +378,56 @@ pub fn decide(c: &Creature, ctx: &PolicyCtx, rng: &mut ChaCha8Rng) -> Plan {
         .fire_near(c.x, c.y, ctx.cfg.actions.fire_warmth_radius, ctx.tick)
         .is_some();
 
-    if let Some(s) = ctx.structures.nearest_shelter(c.x, c.y, 40) {
-        let t = travel_ticks(c, ctx.cfg, (s.x, s.y));
+    // Going home to sleep. A creature with a hearth of its own goes to *that*
+    // one, and puts down what it is carrying on the way in.
+    //
+    // This is the change that makes households work. Provisioning as a separate
+    // errand loses to survival every time — measured at 98 deposits across 51
+    // households over 2,500 ticks, with stores averaging 0.8 against a reserve
+    // of 10 — because a creature deciding between "walk home and put the
+    // berries away" and "eat, drink, or get warm" will always have something
+    // more pressing. Coming home to sleep is not a competing errand; it is
+    // something the creature already does every night. Putting the food away on
+    // the way in costs one tick of a journey it was making anyway.
+    let own = ctx.hearth(c);
+    let bed = own
+        .map(|(_, hx, hy)| (hx, hy, None))
+        .or_else(|| {
+            ctx.structures
+                .nearest_shelter(c.x, c.y, 40)
+                .map(|s| (s.x, s.y, Some(s.id)))
+        });
+    if let Some((sx, sy, sid)) = bed {
+        let t = travel_ticks(c, ctx.cfg, (sx, sy));
         let pull = pressure(c.warmth, warmth_decay(ctx), t)
             .max(if ctx.night { 0.5 } else { night_proximity(ctx) * 0.55 });
-        // Shelter loses its pull the further away it is: walking twenty tiles
-        // to sleep is worse than lighting a fire where you stand.
+
+        let mut steps = vec![Step::new(Goal::MoveTo, Target::Tile(sx, sy), t)];
+        let bringing_something = own.is_some() && c.inventory.weight() > 7.0;
+        if bringing_something {
+            steps.push(Step::new(Goal::DepositToStore, Target::None, 1));
+        }
+        if let Some(id) = sid {
+            steps.push(Step::new(Goal::Shelter, Target::Structure(id), 1));
+        } else {
+            steps.push(Step::new(Goal::Shelter, Target::None, 1));
+        }
+        steps.push(Step::new(Goal::Rest, Target::None, ticks_until_dawn(ctx).max(8)));
+
+        // Home pulls harder than any shelter that merely has a spare bed:
+        // walking twenty tiles to sleep somewhere else is worse than lighting a
+        // fire where you stand, but walking twenty tiles to your own hearth
+        // with a full pack is how a household gets fed.
+        let homeward = if own.is_some() { 1.35 } else { 1.0 };
         offer(Candidate {
-            score: pull * 2.4 / (1.0 + t as f32 / 8.0),
-            steps: vec![
-                Step::new(Goal::MoveTo, Target::Tile(s.x, s.y), t),
-                Step::new(Goal::Shelter, Target::Structure(s.id), 1),
-                Step::new(Goal::Rest, Target::None, ticks_until_dawn(ctx).max(8)),
-            ],
+            score: pull * 2.4 * homeward / (1.0 + t as f32 / 12.0),
+            steps,
             addresses: Addresses::Warmth,
-            rationale: "Under a roof before dark.".into(),
+            rationale: if bringing_something {
+                "Home before dark, and put this away.".into()
+            } else {
+                "Under a roof before dark.".into()
+            },
             confidence: 1.0,
         });
     }
@@ -387,8 +475,17 @@ pub fn decide(c: &Creature, ctx: &PolicyCtx, rng: &mut ChaCha8Rng) -> Plan {
     }
 
     // ---- build a shelter of one's own --------------------------------------
-    if wood_held >= ctx.cfg.actions.shelter_wood_cost
-        && ctx.structures.nearest_shelter(c.x, c.y, 10).is_none()
+    // A creature builds when it has nowhere of its *own* — not when there
+    // happens to be no free bed nearby.
+    //
+    // M2 gated this on `nearest_shelter(10).is_none()`, which tests tonight's
+    // occupancy. Occupancy is zero all day, and daytime is the only time a
+    // shelter can be built, so the answer was always "somewhere nearby has
+    // room" and 4,271 creatures built 35 shelters between them. Homelessness is
+    // a persistent fact about a creature; a free bed is not.
+    let homeless = ctx.hearth(c).is_none();
+    if homeless
+        && wood_held >= ctx.cfg.actions.shelter_wood_cost
         && ctx.world.at(c.x, c.y).passable()
         && !ctx.world.at(c.x, c.y).is_water()
     {
@@ -401,8 +498,13 @@ pub fn decide(c: &Creature, ctx: &PolicyCtx, rng: &mut ChaCha8Rng) -> Plan {
             .water_within(ctx.world, c.x, c.y, 14)
             .map(|_| 1.5)
             .unwrap_or(0.7);
+        // Weighted up for a paired creature: §4.8 will not let them have a
+        // child until they have somewhere to keep the food.
+        let for_a_family = if c.is_paired() { 1.8 } else { 1.0 };
         offer(Candidate {
-            score: 1.15 * near_water * (0.5 + c.traits.industry) * (1.0 + night_proximity(ctx)),
+            score: 1.15 * near_water * for_a_family
+                * (0.5 + c.traits.industry)
+                * (1.0 + night_proximity(ctx)),
             steps: vec![Step::new(
                 Goal::BuildShelter,
                 Target::Tile(c.x, c.y),
@@ -422,6 +524,148 @@ pub fn decide(c: &Creature, ctx: &PolicyCtx, rng: &mut ChaCha8Rng) -> Plan {
     // ---- verify something doubtful ----------------------------------------
     if let Some(cand) = verify_run(c, ctx, &needs) {
         offer(cand);
+    }
+
+    // ---- the household: eat from it, stock it, go back to it ---------------
+    if let Some((_hid, hx, hy)) = ctx.hearth(c) {
+        let at_home = c.x.abs_diff(hx) <= 1 && c.y.abs_diff(hy) <= 1;
+        let store = ctx.households.get(c.household_id.unwrap());
+        let stored = store.map(|h| h.stored_food()).unwrap_or(0.0);
+        let t = travel_ticks(c, ctx.cfg, (hx, hy));
+
+        // Eating from the store is the cheapest meal there is when you are
+        // standing in front of it — but what is *below* the reserve is not
+        // food, it is the household's future.
+        //
+        // Without this distinction the store is a larder rather than a reserve:
+        // it is eaten down as fast as it is filled, never crosses §4.8's
+        // threshold, and no household ever has a child. Measured on a founders
+        // run before the rule existed: 91.5% of all blocked conception ticks
+        // were "store below the reserve", with the households in question
+        // holding food the whole time.
+        //
+        // So above the reserve, eat freely. Below it, only when genuinely
+        // hungry and carrying nothing else — a household starving beside its
+        // seed corn is not thrift, it is stupidity.
+        let reserve = ctx.cfg.reproduction.store_reserve;
+        if at_home && stored > 0.0 {
+            let spare = stored - reserve;
+            let desperate = c.hunger < n.deficit_threshold && c.inventory.total_food() < 1.0;
+            if spare > 0.0 && c.hunger < 70.0 {
+                offer(Candidate {
+                    score: pressure(c.hunger, n.hunger_decay_per_tick, 0) * 1.45,
+                    steps: vec![Step::new(Goal::EatFromStore, Target::None, 1)],
+                    addresses: Addresses::Food,
+                    rationale: "Eat from what the store can spare.".into(),
+                    confidence: 1.0,
+                });
+            } else if desperate {
+                offer(Candidate {
+                    score: pressure(c.hunger, n.hunger_decay_per_tick, 0) * 1.6,
+                    steps: vec![Step::new(Goal::EatFromStore, Target::None, 1)],
+                    addresses: Addresses::Food,
+                    rationale: "Nothing left but the reserve.".into(),
+                    confidence: 1.0,
+                });
+            }
+        }
+
+        // Banking the harvest. This is the single most consequential thing a
+        // Tier 1 creature can do for its lineage: only grain keeps, and only a
+        // household store above the reserve permits a child (§4.4, §4.8). It
+        // is scored on how much of the reserve is still missing, so a household
+        // that has enough stops hoarding and goes back to living.
+        // Only when there is genuinely something spare *and* nothing pressing.
+        // A creature that banks its food and then starves on the walk back has
+        // helped nobody, and its household still has no reserve.
+        // "Can I spare this?" is a question about the pack, not about the
+        // stomach. Gating on hunger alone had creatures walking around with 73
+        // nutrition in hand and an empty household store, because hunger sits
+        // just under any fixed threshold you pick while food keeps arriving.
+        let surplus = c.inventory.weight() - 6.0;
+        // Carrying several meals *is* being able to spare one. Folding hunger
+        // into the test made it fail perpetually, because hunger sits wherever
+        // the food supply pins it and food kept arriving into a pack that never
+        // got emptied into the store.
+        let can_spare =
+            (c.inventory.food_value() > 28.0 || c.hunger > 55.0) && c.thirst > 30.0;
+        if surplus > 1.0 && can_spare {
+            let short = ((ctx.cfg.reproduction.store_reserve - stored)
+                / ctx.cfg.reproduction.store_reserve.max(1.0))
+            .clamp(0.0, 1.0);
+            let grain = c.inventory.total(ItemKind::Grain);
+            // Grain is what the reserve is actually made of, so carrying grain
+            // makes the trip home worth more than carrying berries.
+            let worth = 0.7 + short * 1.9 + (grain / 8.0).min(1.0) * 0.8;
+            let mut steps = Vec::new();
+            if !at_home {
+                steps.push(Step::new(Goal::MoveTo, Target::Tile(hx, hy), t));
+            }
+            steps.push(Step::new(Goal::DepositToStore, Target::None, 1));
+            offer(Candidate {
+                // Tolerant of distance. Provisioning a household is worth a
+                // walk: at a /10 falloff a creature foraging twenty tiles out
+                // never went home, and its household held a mean of 3 food
+                // against a reserve of 20.
+                score: worth * 0.85 * (0.6 + 0.8 * c.traits.industry)
+                    / (1.0 + t as f32 / 20.0),
+                steps,
+                addresses: Addresses::Food,
+                rationale: if short > 0.0 {
+                    format!("Store it — {:.0} of {:.0} toward the reserve.",
+                            stored, ctx.cfg.reproduction.store_reserve)
+                } else {
+                    "Store the surplus.".into()
+                },
+                confidence: 1.0,
+            });
+        }
+
+        // Take provisions out before setting off. Only possible at the hearth.
+        if at_home && stored > 8.0 && c.inventory.food_value() < 12.0 {
+            offer(Candidate {
+                score: 0.55,
+                steps: vec![Step::new(Goal::WithdrawFromStore, Target::None, 1)],
+                addresses: Addresses::Food,
+                rationale: "Take provisions.".into(),
+                confidence: 1.0,
+            });
+        }
+    }
+
+    // ---- neighbours --------------------------------------------------------
+    if let Some(cand) = social_run(c, ctx) {
+        offer(cand);
+    }
+
+    // ---- go where the people are -------------------------------------------
+    //
+    // Courtship was purely opportunistic: it fired only when somebody suitable
+    // happened to be standing next to you. On a 512-tile map with a scattered
+    // population that is a coincidence, not a decision, and the measured result
+    // was fourteen pairings among sixty creatures over three thousand ticks.
+    //
+    // Creatures have no PERSON beliefs yet — they cannot remember where anybody
+    // *lives* — so what they can do is head for the one place people reliably
+    // are: somebody's hearth. That is what makes a settlement a settlement
+    // rather than a scatter of individuals who happen to share a map.
+    if c.life_stage == LifeStage::Adult
+        && c.mate_id.is_none()
+        && c.hunger > 40.0
+        && c.thirst > 40.0
+    {
+        if let Some(s) = ctx.structures.nearest_shelter(c.x, c.y, 60) {
+            let t = travel_ticks(c, ctx.cfg, (s.x, s.y));
+            if t > 1 {
+                offer(Candidate {
+                    score: 0.55 * (0.4 + 1.2 * c.traits.sociability) / (1.0 + t as f32 / 24.0),
+                    steps: vec![Step::new(Goal::MoveTo, Target::Tile(s.x, s.y), t)],
+                    addresses: Addresses::Kinship,
+                    rationale: "Somewhere there are other people.".into(),
+                    confidence: 0.8,
+                });
+            }
+        }
     }
 
     // ---- explore -----------------------------------------------------------
@@ -466,10 +710,286 @@ pub fn decide(c: &Creature, ctx: &PolicyCtx, rng: &mut ChaCha8Rng) -> Plan {
     }
 }
 
+/// Everything that involves another creature standing next to you.
+///
+/// One candidate function rather than eight, because the options are mutually
+/// exclusive in practice — a creature does one social thing per plan — and
+/// because they all need the same expensive thing: the list of who is actually
+/// in reach.
+///
+/// **On teaching, and why it is scored honestly.** §13.5 asks whether creatures
+/// will ever choose to teach, given that it costs six ticks now and pays off
+/// only after the teacher is dead. It would be easy to make parent-to-child
+/// transfer automatic and declare culture achieved; the PRD explicitly says to
+/// resist that, because a simulation that hardcodes the result is performing
+/// culture rather than discovering it. So TEACH is offered here with an honest
+/// utility — the immediate affinity it buys, weighted by sociability — and
+/// whether a Tier 1 population teaches enough for knowledge to outlive its
+/// discoverer is a measurement, reported rather than assumed.
+fn social_run(c: &Creature, ctx: &PolicyCtx) -> Option<Candidate> {
+    if c.life_stage == LifeStage::Infant {
+        return None;
+    }
+    let reach = ctx.cfg.actions.social_reach.max(2);
+    let mut near: Vec<Bystander> = Vec::new();
+    ctx.people.near(c.x, c.y, reach, c.id, &mut near);
+    if near.is_empty() {
+        return None;
+    }
+
+    let n = &ctx.cfg.needs;
+    let mut best: Option<Candidate> = None;
+    let mut offer = |cand: Candidate| {
+        if cand.score > 0.0 && best.as_ref().is_none_or(|b| cand.score > b.score) {
+            best = Some(cand);
+        }
+    };
+
+    // ---- answer anybody who has asked ------------------------------------
+    // Left standing, an offer lapses and costs both parties something, so a
+    // creature answers before it does anything else sociable.
+    if let Some(o) = ctx.courtships.pending_for(c.id) {
+        if c.mate_id.is_none() && near.iter().any(|p| p.id == o.from) {
+            let suitor = near.iter().find(|p| p.id == o.from).unwrap();
+            let affinity = ctx.relationships.get(c.id, o.from);
+            // Health, and how much this creature already likes them. A cautious
+            // creature wants more convincing.
+            let appeal = 0.35 + affinity * 0.5 + (suitor.health / 100.0) * 0.35
+                - c.traits.caution * 0.25;
+            if appeal > 0.35 {
+                offer(Candidate {
+                    score: 1.9,
+                    steps: vec![Step::new(Goal::AcceptCourtship, Target::Creature(o.from), 1)],
+                    addresses: Addresses::Kinship,
+                    rationale: format!("Accept #{}.", o.from),
+                    confidence: 1.0,
+                });
+            } else {
+                offer(Candidate {
+                    score: 1.2,
+                    steps: vec![Step::new(Goal::RejectCourtship, Target::Creature(o.from), 1)],
+                    addresses: Addresses::Kinship,
+                    rationale: format!("Turn #{} down.", o.from),
+                    confidence: 1.0,
+                });
+            }
+        }
+    }
+
+    // ---- a hungry infant in reach ----------------------------------------
+    // Whoever is standing there with food. An infant cannot feed itself, and
+    // this is the only thing that stops the dependency window killing it.
+    if c.inventory.total_food() > 0.0 {
+        let mine = near
+            .iter()
+            .filter(|p| p.life_stage == LifeStage::Infant && p.hunger < 65.0)
+            .min_by(|a, b| {
+                // The household's own first, then the hungriest.
+                let own = |p: &Bystander| p.household_id.is_some() && p.household_id == c.household_id;
+                own(b).cmp(&own(a)).then(a.hunger.total_cmp(&b.hunger))
+            });
+        if let Some(inf) = mine {
+            let own = inf.household_id.is_some() && inf.household_id == c.household_id;
+            let kin = ctx.relationships.get(c.id, inf.id);
+            let urgency = 1.0 - (inf.hunger / 100.0);
+            offer(Candidate {
+                score: urgency * (if own { 2.4 } else { 0.7 })
+                    * (0.5 + c.traits.sociability + kin.max(0.0)),
+                steps: vec![Step::new(Goal::FeedInfant, Target::Creature(inf.id), 1)],
+                addresses: Addresses::Kinship,
+                rationale: format!("Feed #{}.", inf.id),
+                confidence: 1.0,
+            });
+        }
+    }
+
+    // ---- meat that will not keep ------------------------------------------
+    // §4.4: a slaughtered sheep is four days of food nobody can eat alone.
+    // Generosity becomes the rational move, discovered rather than imposed —
+    // so this is scored on the surplus, not on a rule about sharing.
+    let perishing = c
+        .inventory
+        .batches
+        .iter()
+        .filter(|b| b.kind.is_food())
+        .filter(|b| {
+            economy::ticks_until_spoiled(b, ctx.tick, ctx.cfg).is_some_and(|t| t < 36)
+        })
+        .map(|b| b.quantity)
+        .sum::<f32>();
+    if perishing > 8.0 {
+        if let Some(p) = near
+            .iter()
+            .filter(|p| p.life_stage != LifeStage::Infant && p.hunger < 70.0)
+            .min_by(|a, b| a.hunger.total_cmp(&b.hunger))
+        {
+            let kin = ctx.relationships.get(c.id, p.id).max(0.0);
+            offer(Candidate {
+                score: (perishing / 20.0).min(1.2)
+                    * (0.4 + c.traits.sociability + kin)
+                    * 0.9,
+                steps: vec![Step::new(Goal::GiveFood, Target::Creature(p.id), 1)],
+                addresses: Addresses::Kinship,
+                rationale: "This will spoil before I can eat it.".into(),
+                confidence: 1.0,
+            });
+        }
+    }
+
+    // ---- court -------------------------------------------------------------
+    if c.is_courtable(&ctx.cfg.lifespan, ctx.tick) && c.hunger > 35.0 && c.thirst > 35.0 {
+        let suitor = near
+            .iter()
+            .filter(|p| {
+                p.sex != c.sex
+                    && !p.paired
+                    && p.life_stage == LifeStage::Adult
+                    && p.health > 45.0
+            })
+            .max_by(|a, b| {
+                let score = |p: &Bystander| {
+                    ctx.relationships.get(c.id, p.id) + p.health / 200.0
+                };
+                score(a).total_cmp(&score(b)).then(b.id.cmp(&a.id))
+            });
+        if let Some(p) = suitor {
+            let affinity = ctx.relationships.get(c.id, p.id);
+            // Boldness is willingness to make the approach; caution is what
+            // holds it back until the ground is firmer.
+            let nerve = 0.45 + c.traits.boldness * 0.7 + affinity * 0.6
+                - c.traits.caution * 0.3;
+            offer(Candidate {
+                score: nerve.max(0.0) * 1.35,
+                steps: vec![Step::new(Goal::Court, Target::Creature(p.id), 1)],
+                addresses: Addresses::Kinship,
+                rationale: format!("Ask #{}.", p.id),
+                confidence: 1.0,
+            });
+        }
+    }
+
+    // ---- join a household --------------------------------------------------
+    //
+    // A household you have a claim on: your mate's, or your parents'. Not
+    // whichever roof happens to be nearest.
+    //
+    // Letting anybody join anybody filled a dozen households with unrelated
+    // adults who each drew on the store and none of whom then founded a home of
+    // their own — 150 creatures, 78 courtships, 12 households, and every store
+    // eaten flat by people who were not raising anything. Belonging somewhere
+    // has to mean something, or nobody ever builds.
+    if c.household_id.is_none() {
+        let claim = near
+            .iter()
+            .filter(|p| p.household_id.is_some())
+            .filter(|p| {
+                ctx.households
+                    .get(p.household_id.unwrap())
+                    .is_some_and(|hh| hh.shelter_id.is_some())
+            })
+            .filter(|p| {
+                // Kin or mate: somebody this creature actually belongs with.
+                Some(p.id) == c.mate_id || ctx.relationships.get(c.id, p.id) > 0.35
+            })
+            .max_by(|a, b| {
+                ctx.relationships
+                    .get(c.id, a.id)
+                    .total_cmp(&ctx.relationships.get(c.id, b.id))
+                    .then(b.id.cmp(&a.id))
+            });
+        if let Some(p) = claim {
+            let h = p.household_id.unwrap();
+            let kin = ctx.relationships.get(c.id, p.id);
+            offer(Candidate {
+                score: (0.6 + kin * 1.4) * (0.4 + c.traits.sociability),
+                steps: vec![Step::new(Goal::JoinHousehold, Target::Household(h), 1)],
+                addresses: Addresses::Kinship,
+                rationale: format!("Join household {h}."),
+                confidence: 1.0,
+            });
+        }
+    }
+
+    // ---- tell somebody something ------------------------------------------
+    //
+    // Only if there is something to tell. Without that test a creature shares
+    // with whoever is standing there, over and over, because each share nudges
+    // affinity up and makes the next one look better still — measured at 37% of
+    // all decisions in a founders run, while the same creatures gathered 365
+    // units of food between them and starved.
+    //
+    // Trust gates *whether* (§4.11): kin and household get generous sharing,
+    // strangers get little. That is a disposition rather than a rule, and the
+    // model is free to override it in either direction.
+    if ctx.cfg.features.knowledge_sharing && !c.beliefs.is_empty() {
+        let mine = knowledge::known_kinds(&c.beliefs, ctx.tick, &ctx.cfg.knowledge);
+        let listener = near.iter().find_map(|p| {
+            let topic = knowledge::topic_for(mine, p.known_kinds)?;
+            Some((p, topic))
+        });
+        if let Some((p, topic)) = listener {
+            let household = p.household_id.is_some() && p.household_id == c.household_id;
+            let trust = ctx.relationships.get(c.id, p.id) + if household { 0.5 } else { 0.0 };
+            let willing = c.traits.sociability * 0.8 + trust * 0.6;
+            if willing > 0.35 {
+                offer(Candidate {
+                    score: willing * 0.30,
+                    steps: vec![
+                        Step::new(Goal::ShareKnowledge, Target::Creature(p.id), 1).about(topic)
+                    ],
+                    addresses: Addresses::Knowledge,
+                    rationale: format!(
+                        "Tell #{} about {}.",
+                        p.id,
+                        topic.as_str().replace('_', " ").to_lowercase()
+                    ),
+                    confidence: 1.0,
+                });
+            }
+        }
+    }
+
+    // ---- teach the young ---------------------------------------------------
+    if ctx.cfg.features.teaching && c.household_id.is_some() && c.beliefs.len() >= 4 {
+        if let Some(pupil) = near
+            .iter()
+            .filter(|p| {
+                p.household_id == c.household_id && p.life_stage != LifeStage::Elder
+                    && p.id != c.id
+            })
+            .min_by_key(|p| p.id)
+        {
+            // What it is worth *now*, which is all a myopic policy can see: the
+            // affinity it buys, weighted by how sociable this creature is. The
+            // thing that would actually justify it — a lineage that still knows
+            // where the water is in eighty years — is invisible from here. That
+            // is the gap the model is supposed to close.
+            let kin = ctx.relationships.get(c.id, pupil.id).max(0.0);
+            let comfortable = c.hunger > 55.0 && c.thirst > 55.0 && c.fatigue > 40.0;
+            if comfortable {
+                offer(Candidate {
+                    score: (0.30 + kin * 0.35) * (0.3 + c.traits.sociability * 0.9),
+                    steps: vec![Step::new(
+                        Goal::Teach,
+                        Target::Creature(pupil.id),
+                        ctx.cfg.knowledge.teach_ticks,
+                    )],
+                    addresses: Addresses::Knowledge,
+                    rationale: format!("Teach #{} what I know.", pupil.id),
+                    confidence: 1.0,
+                });
+            }
+        }
+    }
+
+    let _ = n;
+    best
+}
+
 /// Fetch food from wherever the creature believes food is: berries, a wheat
 /// field, or a sheep. All three route through the same candidate so they
 /// compete on their merits rather than by a hardcoded preference order.
-fn food_run(c: &Creature, ctx: &PolicyCtx, needs: &NeedProfile) -> Option<Candidate> {
+fn food_run(c: &Creature, ctx: &PolicyCtx) -> Option<Candidate> {
     let n = &ctx.cfg.needs;
     if c.inventory.weight() >= c.carry_capacity(ctx.cfg) - 0.5 {
         return None;
@@ -479,22 +999,77 @@ fn food_run(c: &Creature, ctx: &PolicyCtx, needs: &NeedProfile) -> Option<Candid
     let mut best: Option<Candidate> = None;
 
     for kind in kinds {
-        let Some(i) = knowledge::best_of(
-            &c.beliefs, &[kind], (c.x, c.y), ctx.tick, needs, &ctx.cfg.knowledge,
-        ) else {
+        let node_kind_probe = node_kind_for(kind);
+        if !ctx.cfg.features.wheat && node_kind_probe == NodeKind::Wheat {
+            continue;
+        }
+        if !ctx.cfg.features.sheep && node_kind_probe == NodeKind::Sheep {
+            continue;
+        }
+
+        // Rank, then take the first belief that resolves to something actually
+        // standing there — not simply the best-ranked one.
+        //
+        // `SOIL_PATCH` covers both a wheat node and a bare patch of farmable
+        // ground, because from a creature's point of view they are the same
+        // kind of place. Taking only the single best belief therefore kept
+        // picking bare soil, failing to find a crop on it, and abandoning the
+        // whole wheat option — while the creature stood there knowing perfectly
+        // well where a field was. Since grain is the only food that keeps, and
+        // the household reserve is what gates reproduction, that one line was
+        // quietly severing the entire path from foraging to a lineage.
+        // Ranked *within this kind*, then the first that resolves to something
+        // actually standing there. Ranking across all kinds and filtering
+        // afterwards is the same mistake in a different place: the top of a
+        // creature's overall ranking is nearly always water and berries, so no
+        // soil patch ever survived the filter and grain vanished again.
+        let mut ranked: Vec<(usize, f32)> = c
+            .beliefs
+            .iter()
+            .enumerate()
+            .filter(|(_, b)| b.kind == kind)
+            .map(|(i, b)| {
+                (i, knowledge::target_quality(b, (c.x, c.y), ctx.tick, &ctx.cfg.knowledge))
+            })
+            .filter(|(_, q)| *q > 0.0)
+            .collect();
+        ranked.sort_by(|a, b| b.1.total_cmp(&a.1).then(a.0.cmp(&b.0)));
+
+        let Some((i, node)) = ranked.into_iter().find_map(|(i, _)| {
+            let b = &c.beliefs[i];
+            find_node(ctx, node_kind_probe, b.x, b.y).map(|nd| (i, nd))
+        }) else {
             continue;
         };
         let b = &c.beliefs[i];
         let conf = b.confidence_at(ctx.tick, &ctx.cfg.knowledge);
-        let quality = knowledge::target_quality(b, (c.x, c.y), ctx.tick, &ctx.cfg.knowledge);
+        let mut quality = knowledge::target_quality(b, (c.x, c.y), ctx.tick, &ctx.cfg.knowledge);
         let t = travel_ticks(c, ctx.cfg, (b.x, b.y));
 
-        let (node_kind, goal, work, yield_bias) = match kind {
-            BeliefKind::ForageNode => (NodeKind::Forage, Goal::GatherForage, 5, 1.0),
-            // Wheat is worth more per unit and keeps, so a known field beats
+        // A creature with a home forages around it. Not a rule — a weighting —
+        // but it is what turns a household from an address into a base, and
+        // what puts the walk back with a full pack within reach of being worth
+        // making. Without it creatures drift outward from their own hearth and
+        // the store stays empty however much they gather.
+        if let Some((_, hx, hy)) = ctx.hearth(c) {
+            let dx = b.x as f32 - hx as f32;
+            let dy = b.y as f32 - hy as f32;
+            let from_home = (dx * dx + dy * dy).sqrt();
+            quality *= 1.0 + 0.6 / (1.0 + from_home / 18.0);
+        }
+
+        // Long enough that the trip pays for itself. At five ticks of work
+        // against fifteen of walking, three quarters of every foraging journey
+        // was travel, and a household never accumulated a surplus to store —
+        // the same defect that stopped anybody building a shelter at M2, in a
+        // different place.
+        let node_kind = node_kind_for(kind);
+        let (goal, work, yield_bias) = match kind {
+            BeliefKind::ForageNode => (Goal::GatherForage, 10, 1.0),
+            // Wheat is worth more per unit and it keeps, so a known field beats
             // berries even at a distance — which is the whole point of grain.
-            BeliefKind::SoilPatch => (NodeKind::Wheat, Goal::HarvestWheat, 5, 1.9),
-            _ => (NodeKind::Sheep, Goal::SlaughterSheep, 1, 1.5),
+            BeliefKind::SoilPatch => (Goal::HarvestWheat, 10, 2.4),
+            _ => (Goal::SlaughterSheep, 1, 1.5),
         };
         if !ctx.cfg.features.wheat && node_kind == NodeKind::Wheat {
             continue;
@@ -502,9 +1077,6 @@ fn food_run(c: &Creature, ctx: &PolicyCtx, needs: &NeedProfile) -> Option<Candid
         if !ctx.cfg.features.sheep && node_kind == NodeKind::Sheep {
             continue;
         }
-        let Some(node) = find_node(ctx, node_kind, b.x, b.y) else {
-            continue;
-        };
 
         let mut steps = vec![
             Step::new(Goal::MoveTo, Target::Tile(b.x, b.y), t),
@@ -755,6 +1327,16 @@ fn explore_target(c: &Creature, ctx: &PolicyCtx, rng: &mut ChaCha8Rng) -> (u32, 
     target
 }
 
+/// Which resource actually stands on the kind of place a belief describes.
+fn node_kind_for(kind: BeliefKind) -> NodeKind {
+    match kind {
+        BeliefKind::ForageNode => NodeKind::Forage,
+        BeliefKind::SoilPatch => NodeKind::Wheat,
+        BeliefKind::WoodNode => NodeKind::Wood,
+        _ => NodeKind::Sheep,
+    }
+}
+
 fn find_node(ctx: &PolicyCtx, kind: NodeKind, x: u32, y: u32) -> Option<u32> {
     ctx.nodes.find_at(ctx.world, kind, x, y)
 }
@@ -848,6 +1430,10 @@ mod tests {
         structures: Structures,
         cache: WorldCache,
         nodes: NodeIndex,
+        people: CreatureIndex,
+        households: Households,
+        courtships: Courtships,
+        relationships: Relationships,
         cfg: WorldConfig,
     }
 
@@ -869,8 +1455,23 @@ mod tests {
             }
             let cache = WorldCache::build(&world);
             let nodes = NodeIndex::new(&world, 8);
-            Self { world, structures: Structures::new(), cache, nodes,
-                   cfg: WorldConfig::default() }
+            let people = CreatureIndex::new(world.width, world.height, 8);
+            Self {
+                world,
+                structures: Structures::new(),
+                cache,
+                nodes,
+                people,
+                households: Households::new(),
+                courtships: Courtships::new(),
+                relationships: Relationships::new(),
+                cfg: WorldConfig::default(),
+            }
+        }
+
+        /// Put these creatures on the map so the social candidates can see them.
+        fn populate(&mut self, creatures: &[Creature]) {
+            self.people.rebuild(creatures.iter(), 0, &self.cfg.knowledge);
         }
 
         fn rebuild_index(&mut self) {
@@ -883,6 +1484,10 @@ mod tests {
                 structures: &self.structures,
                 cache: &self.cache,
                 nodes: &self.nodes,
+                people: &self.people,
+                households: &self.households,
+                courtships: &self.courtships,
+                relationships: &self.relationships,
                 cfg: &self.cfg,
                 tick,
                 night,
@@ -1219,6 +1824,50 @@ mod tests {
             plan.steps.iter().map(|s| s.goal).collect::<Vec<_>>(),
             plan.rationale
         );
+    }
+
+    #[test]
+    fn an_unattached_adult_beside_a_suitable_stranger_asks() {
+        // §4.8's pairing is mutual and two-sided, so somebody has to put the
+        // question first.
+        let mut f = Fixture::new();
+        let mut a = test_creature();
+        a.id = 1;
+        (a.x, a.y) = (30, 30);
+        a.traits.boldness = 0.9;
+        a.beliefs.push(belief(BeliefKind::Water, 62, 30, 0));
+
+        let mut b = test_creature();
+        b.id = 2;
+        (b.x, b.y) = (31, 30);
+        b.sex = crate::sim::creature::Sex::Male;
+        f.populate(&[a.clone(), b]);
+
+        let plan = decide(&a, &f.ctx(10, false), &mut rng());
+        assert!(
+            plan.steps.iter().any(|s| s.goal == Goal::Court),
+            "got {:?} ({})",
+            plan.steps.iter().map(|s| s.goal).collect::<Vec<_>>(),
+            plan.rationale
+        );
+    }
+
+    #[test]
+    fn nobody_courts_while_starving() {
+        // Courtship is what a creature does when it is not busy dying.
+        let mut f = Fixture::new();
+        let mut a = test_creature();
+        a.id = 1;
+        (a.x, a.y) = (30, 30);
+        a.hunger = 8.0;
+        let mut b = test_creature();
+        b.id = 2;
+        (b.x, b.y) = (31, 30);
+        b.sex = crate::sim::creature::Sex::Male;
+        f.populate(&[a.clone(), b]);
+
+        let plan = decide(&a, &f.ctx(10, false), &mut rng());
+        assert!(!plan.steps.iter().any(|s| s.goal == Goal::Court));
     }
 
     #[test]

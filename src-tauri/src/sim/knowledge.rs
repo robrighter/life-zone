@@ -57,6 +57,15 @@ impl BeliefKind {
         })
     }
 
+    /// One bit per kind, so "what does this creature know about?" fits in a
+    /// `u16` and can be carried on the cheap per-tick view of a bystander.
+    /// Without it, deciding whether somebody would benefit from being told
+    /// something means reaching into their belief list, and the policy cannot
+    /// borrow another creature.
+    pub fn bit(self) -> u16 {
+        1 << (self as u16)
+    }
+
     /// How fast a belief of this kind goes stale, as a multiple of the base
     /// decay rate.
     ///
@@ -389,6 +398,172 @@ fn least_worth_keeping(beliefs: &[Belief], tick: i64, cfg: &KnowledgeConfig) -> 
     worst
 }
 
+/// The three channels knowledge moves over (§4.11), in increasing cost and
+/// fidelity.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum Channel {
+    /// Passive, free, always on. Being near somebody leaks a little of what
+    /// they know, at low confidence and with no decision involved.
+    Observation,
+    /// One tick, small fatigue, topic-filtered, to an adjacent creature.
+    Share,
+    /// Multi-tick, higher fatigue, household-only, adult to young. Transmits at
+    /// `hops: 0` — as though the recipient had seen it themselves.
+    Teach,
+}
+
+impl Channel {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Channel::Observation => "OBSERVATION",
+            Channel::Share => "SHARE_KNOWLEDGE",
+            Channel::Teach => "TEACH",
+        }
+    }
+}
+
+/// Turn one creature's belief into the version another creature receives.
+///
+/// Provenance is the point. `hops` counts distance from firsthand observation
+/// and each transmission degrades confidence, so secondhand knowledge is
+/// genuinely worse than firsthand and a creature can reason about how far to
+/// commit on it (§5.5).
+///
+/// What does *not* degrade is the origin. `origin_creature_id` and
+/// `origin_tick` are copied through every retransmission unchanged, so a belief
+/// in circulation in generation five can still be traced to the creature that
+/// first walked there in generation one — long after that creature is dead.
+/// That pair is the whole of S7: "knowledge outlives its discoverer" is a query
+/// over these two columns, not an inference.
+pub fn transmit(
+    belief: &Belief,
+    from: i64,
+    channel: Channel,
+    cfg: &KnowledgeConfig,
+    tick: i64,
+) -> Belief {
+    let current = belief.confidence_at(tick, cfg);
+
+    let (hops, confidence) = match channel {
+        // Teaching is high-fidelity by design: expensive in exactly the way
+        // that matters, and worth what it costs precisely because what it
+        // hands over does not arrive already half-forgotten.
+        Channel::Teach => (0, current * cfg.teach_fidelity),
+        Channel::Share => (
+            belief.hops.saturating_add(1),
+            current * (1.0 - cfg.per_hop_penalty),
+        ),
+        // Watching someone carry wheat tells you wheat exists. It does not tell
+        // you much, and you did not really check.
+        Channel::Observation => (
+            belief.hops.saturating_add(1),
+            (current * (1.0 - cfg.per_hop_penalty)).min(cfg.ambient_confidence),
+        ),
+    };
+
+    Belief {
+        hops,
+        confidence: confidence.clamp(0.0, 1.0),
+        // The recipient learns of it now but has not seen it: the clock on
+        // staleness keeps running from when it was last actually verified.
+        learned_tick: tick,
+        source_creature_id: Some(from),
+        ..*belief
+    }
+}
+
+/// A bitmask of the kinds this creature knows anything credible about.
+pub fn known_kinds(beliefs: &[Belief], tick: i64, cfg: &KnowledgeConfig) -> u16 {
+    let mut mask = 0;
+    for b in beliefs {
+        if b.confidence_at(tick, cfg) > 0.15 {
+            mask |= b.kind.bit();
+        }
+    }
+    mask
+}
+
+/// The kind this creature could usefully tell that one about, if any.
+///
+/// Cheap enough to ask on every candidate evaluation, because both sides are
+/// already reduced to a bitmask. Returning `None` — having nothing to add — is
+/// the common case and needs to be, or creatures talk instead of eating.
+pub fn topic_for(mine: u16, theirs: u16) -> Option<BeliefKind> {
+    const ORDER: [BeliefKind; 5] = [
+        BeliefKind::Water,
+        BeliefKind::ForageNode,
+        BeliefKind::SoilPatch,
+        BeliefKind::WoodNode,
+        BeliefKind::Shelter,
+    ];
+    ORDER
+        .into_iter()
+        .find(|k| mine & k.bit() != 0 && theirs & k.bit() == 0)
+}
+
+/// Which beliefs a creature offers, given a topic it has chosen to talk about.
+///
+/// §4.11 calls the selection the interesting part, and it is: telling a
+/// stranger where your household's soil patch is costs you nothing directly,
+/// and a rival household that learns to farm is a rival household that
+/// survives. The topic filter is the shape of that decision. At M2/M3 the
+/// utility policy picks a topic from what the listener seems to lack; the model
+/// gets the same lever and can use it worse, or better, or stranger.
+///
+/// Within a topic the best-known beliefs go first — there is no point handing
+/// over the one you are least sure of.
+pub fn select_for_sharing(
+    beliefs: &[Belief],
+    topic: Option<BeliefKind>,
+    from: (u32, u32),
+    tick: i64,
+    cfg: &KnowledgeConfig,
+    n: usize,
+) -> Vec<usize> {
+    let mut scored: Vec<(usize, f32)> = beliefs
+        .iter()
+        .enumerate()
+        .filter(|(_, b)| topic.is_none_or(|t| b.kind == t))
+        .map(|(i, b)| (i, target_quality(b, from, tick, cfg)))
+        .filter(|(_, q)| *q > 0.02)
+        .collect();
+    scored.sort_by(|a, b| b.1.total_cmp(&a.1).then(a.0.cmp(&b.0)));
+    scored.into_iter().take(n).map(|(i, _)| i).collect()
+}
+
+/// What this creature knows that the other one does not, by kind — the topic
+/// worth raising. Returns `None` when there is nothing to add.
+pub fn topic_worth_sharing(
+    mine: &[Belief],
+    theirs: &[Belief],
+    tick: i64,
+    cfg: &KnowledgeConfig,
+) -> Option<BeliefKind> {
+    // Fixed order rather than by count: the traversal must not depend on which
+    // beliefs happen to be held (invariant 7), and this ranks by how badly a
+    // creature needs the thing if it turns out not to know it.
+    const ORDER: [BeliefKind; 5] = [
+        BeliefKind::Water,
+        BeliefKind::ForageNode,
+        BeliefKind::SoilPatch,
+        BeliefKind::WoodNode,
+        BeliefKind::Shelter,
+    ];
+    for kind in ORDER {
+        let i_know = mine
+            .iter()
+            .any(|b| b.kind == kind && b.confidence_at(tick, cfg) > 0.35);
+        let they_know = theirs
+            .iter()
+            .any(|b| b.kind == kind && b.confidence_at(tick, cfg) > 0.15);
+        if i_know && !they_know {
+            return Some(kind);
+        }
+    }
+    None
+}
+
 /// Drop beliefs that have decayed to nothing. A creature genuinely forgets:
 /// the clearing it heard about three weeks ago stops being a place it knows.
 pub fn forget_expired(beliefs: &mut Vec<Belief>, tick: i64, cfg: &KnowledgeConfig) -> usize {
@@ -668,5 +843,141 @@ mod tests {
         assert!(b.provenance(300).contains("told you"));
         b.hops = 3;
         assert!(b.provenance(300).contains("3 hops"));
+    }
+}
+
+#[cfg(test)]
+mod transmission_tests {
+    use super::*;
+
+    fn cfg() -> KnowledgeConfig {
+        KnowledgeConfig::default()
+    }
+
+    fn belief(kind: BeliefKind, x: u32, y: u32, verified: i64) -> Belief {
+        Belief {
+            kind,
+            x,
+            y,
+            estimate: Estimate::Plentiful,
+            confidence: 1.0,
+            learned_tick: verified,
+            last_verified_tick: verified,
+            source_creature_id: None,
+            hops: 0,
+            origin_creature_id: Some(41),
+            origin_tick: verified,
+        }
+    }
+
+    #[test]
+    fn sharing_costs_a_hop_and_some_confidence() {
+        let c = cfg();
+        let mine = belief(BeliefKind::Water, 10, 10, 100);
+        let yours = transmit(&mine, 7, Channel::Share, &c, 100);
+
+        assert_eq!(yours.hops, 1);
+        assert_eq!(yours.source_creature_id, Some(7));
+        assert!(yours.confidence < mine.confidence, "hearsay is worse than seeing");
+        assert_eq!(yours.confidence, 1.0 - c.per_hop_penalty);
+    }
+
+    #[test]
+    fn teaching_transmits_as_though_firsthand() {
+        // §4.11: TEACH is a bulk, high-fidelity transfer at hops 0. That is
+        // what makes six ticks of an adult's time worth spending.
+        let c = cfg();
+        let mine = belief(BeliefKind::SoilPatch, 40, 40, 200);
+        let taught = transmit(&mine, 7, Channel::Teach, &c, 260);
+
+        assert_eq!(taught.hops, 0, "taught knowledge is not hearsay");
+        assert!(taught.confidence > 0.9);
+    }
+
+    #[test]
+    fn ambient_observation_leaks_only_a_little() {
+        let c = cfg();
+        let mine = belief(BeliefKind::WoodNode, 20, 20, 100);
+        let overheard = transmit(&mine, 7, Channel::Observation, &c, 100);
+
+        assert!(overheard.hops >= 1);
+        assert!(
+            overheard.confidence <= c.ambient_confidence,
+            "watching where somebody walks is not being told"
+        );
+    }
+
+    #[test]
+    fn the_discoverer_survives_every_retransmission() {
+        // This is S7's mechanism: a belief in circulation long after its
+        // discoverer is dead can still be attributed to them.
+        let c = cfg();
+        let mut b = belief(BeliefKind::Water, 10, 10, 50);
+        b.confidence = 1.0;
+
+        for hop in 0..4 {
+            b = transmit(&b, 100 + hop, Channel::Share, &c, 60);
+            b.confidence = b.confidence.max(0.6); // keep it alive to keep hopping
+            assert_eq!(b.origin_creature_id, Some(41), "credit never moves");
+            assert_eq!(b.origin_tick, 50);
+        }
+        assert!(b.hops >= 4);
+    }
+
+    #[test]
+    fn a_taught_belief_still_credits_the_original_discoverer() {
+        let c = cfg();
+        let mut b = belief(BeliefKind::SoilPatch, 12, 12, 30);
+        b = transmit(&b, 5, Channel::Share, &c, 40);
+        let taught = transmit(&b, 6, Channel::Teach, &c, 50);
+
+        assert_eq!(taught.hops, 0, "fidelity is restored");
+        assert_eq!(taught.origin_creature_id, Some(41), "but authorship is not rewritten");
+    }
+
+    #[test]
+    fn a_sharer_offers_what_it_is_surest_of_first() {
+        let c = cfg();
+        let mut beliefs = vec![
+            belief(BeliefKind::ForageNode, 12, 10, 0),
+            belief(BeliefKind::ForageNode, 11, 10, 500),
+        ];
+        beliefs[0].estimate = Estimate::Empty;
+
+        let picked = select_for_sharing(&beliefs, Some(BeliefKind::ForageNode),
+                                        (10, 10), 500, &c, 1);
+        assert_eq!(picked, vec![1], "the fresh, plentiful one goes first");
+    }
+
+    #[test]
+    fn the_topic_filter_is_respected() {
+        let c = cfg();
+        let beliefs = vec![
+            belief(BeliefKind::Water, 12, 10, 100),
+            belief(BeliefKind::WoodNode, 13, 10, 100),
+        ];
+        let picked = select_for_sharing(&beliefs, Some(BeliefKind::Water), (10, 10), 100, &c, 5);
+        assert_eq!(picked, vec![0]);
+    }
+
+    #[test]
+    fn the_topic_raised_is_one_the_listener_lacks() {
+        let c = cfg();
+        let mine = vec![
+            belief(BeliefKind::Water, 10, 10, 100),
+            belief(BeliefKind::WoodNode, 20, 20, 100),
+        ];
+        let theirs = vec![belief(BeliefKind::Water, 10, 10, 100)];
+
+        assert_eq!(
+            topic_worth_sharing(&mine, &theirs, 100, &c),
+            Some(BeliefKind::WoodNode),
+            "no point telling somebody about the river they drink at"
+        );
+        assert_eq!(
+            topic_worth_sharing(&theirs, &mine, 100, &c),
+            None,
+            "and nothing to add is a legitimate answer"
+        );
     }
 }

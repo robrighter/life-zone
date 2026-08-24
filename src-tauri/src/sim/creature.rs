@@ -302,6 +302,9 @@ pub enum Addresses {
     Rest,
     Fuel,
     Knowledge,
+    /// Anything to do with other creatures: courting, feeding, joining,
+    /// giving. Never a crisis, so it is always interruptible by one.
+    Kinship,
     Nothing,
 }
 
@@ -389,8 +392,32 @@ pub struct Creature {
     /// need happened to be lowest — otherwise every accident would be recorded
     /// as starvation and the cause-of-death breakdown would lie.
     pub trauma: Option<(DeathCause, i64)>,
+    // ---- society (§4.8–§4.10) --------------------------------------------
+    /// The other half of a mutual pairing. Set on both sides or on neither.
+    pub mate_id: Option<i64>,
+    pub paired_tick: Option<i64>,
+    /// Who fathered the child, and the tick it is due.
+    pub pregnancy: Option<Pregnancy>,
+    pub last_birth_tick: Option<i64>,
+    pub children_born: i32,
+    /// An infant follows this creature and is fed by it (§4.7). Without a
+    /// living guardian an infant cannot feed itself and dies — the dependency
+    /// window the PRD calls deliberately harsh.
+    pub guardian_id: Option<i64>,
+    pub taught_count: i32,
+    pub shared_count: i32,
+
     /// Set when the row differs from what is in SQLite.
     pub dirty: bool,
+}
+
+/// A pregnancy in progress (§4.8). Gestation is 48 ticks; childbirth carries a
+/// small mortality risk for the mother, which is what makes reproduction a
+/// genuine gamble rather than a free action.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+pub struct Pregnancy {
+    pub father_id: i64,
+    pub due_tick: i64,
 }
 
 impl Creature {
@@ -455,6 +482,18 @@ impl Creature {
         } else {
             "well"
         }
+    }
+
+    pub fn is_paired(&self) -> bool {
+        self.mate_id.is_some()
+    }
+
+    /// Eligible to be courted or to court: an unattached adult in reasonable
+    /// health. Elders are not excluded from company, only from reproduction.
+    pub fn is_courtable(&self, cfg: &LifespanConfig, tick: i64) -> bool {
+        let _ = cfg;
+        let _ = tick;
+        self.life_stage == LifeStage::Adult && self.mate_id.is_none() && self.health > 40.0
     }
 
     /// The need in the deepest deficit, which is what decides the cause when
@@ -643,6 +682,14 @@ pub mod testing {
             exposed_ticks: 0,
             at_fire: false,
             trauma: None,
+            mate_id: None,
+            paired_tick: None,
+            pregnancy: None,
+            last_birth_tick: None,
+            children_born: 0,
+            guardian_id: None,
+            taught_count: 0,
+            shared_count: 0,
             dirty: true,
         }
     }

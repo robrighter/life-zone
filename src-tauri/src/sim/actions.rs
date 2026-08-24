@@ -11,8 +11,10 @@
 //! land at M4. `HERD_SHEEP` and `BUILD_PEN` go with them.
 
 use crate::config::WorldConfig;
-use crate::sim::creature::{Creature, ItemKind};
+use crate::sim::creature::{Creature, ItemKind, LifeStage};
 use crate::sim::economy::{Structure, StructureKind, Structures};
+use crate::sim::knowledge::BeliefKind;
+use crate::sim::social::{Bystander, CreatureIndex, Courtships, Households, SocialIntent};
 use crate::sim::event::{Event, EventKind};
 use crate::sim::pathfind::Pathfinder;
 use crate::sim::terrain::Terrain;
@@ -41,6 +43,24 @@ pub enum Goal {
     RepairShelter,
     Explore,
     Verify,
+
+    // ---- society (§4.10). Every one of these reaches into another creature,
+    // so they record an intent that resolution applies (see `SocialIntent`).
+    Court,
+    AcceptCourtship,
+    RejectCourtship,
+    GiveFood,
+    FeedInfant,
+    Follow,
+    JoinHousehold,
+    LeaveHousehold,
+    DepositToStore,
+    WithdrawFromStore,
+    EatFromStore,
+
+    // ---- knowledge transmission (§4.11)
+    ShareKnowledge,
+    Teach,
 }
 
 impl Goal {
@@ -63,6 +83,19 @@ impl Goal {
             Goal::RepairShelter => "REPAIR_SHELTER",
             Goal::Explore => "EXPLORE",
             Goal::Verify => "VERIFY",
+            Goal::Court => "COURT",
+            Goal::AcceptCourtship => "ACCEPT_COURTSHIP",
+            Goal::RejectCourtship => "REJECT_COURTSHIP",
+            Goal::GiveFood => "GIVE_FOOD",
+            Goal::FeedInfant => "FEED_INFANT",
+            Goal::Follow => "FOLLOW",
+            Goal::JoinHousehold => "JOIN_HOUSEHOLD",
+            Goal::LeaveHousehold => "LEAVE_HOUSEHOLD",
+            Goal::DepositToStore => "DEPOSIT_TO_STORE",
+            Goal::WithdrawFromStore => "WITHDRAW_FROM_STORE",
+            Goal::EatFromStore => "EAT_FROM_STORE",
+            Goal::ShareKnowledge => "SHARE_KNOWLEDGE",
+            Goal::Teach => "TEACH",
         }
     }
 
@@ -79,7 +112,20 @@ impl Goal {
             Goal::BuildShelter | Goal::RepairShelter | Goal::PlantWheat | Goal::TendCrop => {
                 d.horizon_cap_construction
             }
-            Goal::Drink | Goal::EatFromInventory => d.horizon_cap_crisis,
+            Goal::Drink | Goal::EatFromInventory | Goal::EatFromStore => d.horizon_cap_crisis,
+            // "You cannot commit to a courtship twenty ticks in advance" —
+            // anything that depends on another creature still being there, and
+            // still willing, is capped hard (§5.5).
+            Goal::Court
+            | Goal::AcceptCourtship
+            | Goal::RejectCourtship
+            | Goal::GiveFood
+            | Goal::FeedInfant
+            | Goal::ShareKnowledge
+            | Goal::Teach
+            | Goal::JoinHousehold
+            | Goal::LeaveHousehold => d.horizon_cap_social,
+            Goal::Follow => d.horizon_cap_travel,
             _ => d.horizon_cap_gather,
         }
     }
@@ -100,6 +146,8 @@ pub enum Target {
     /// index stays a valid handle for as long as a plan holds one.
     Node(u32),
     Structure(i64),
+    Creature(i64),
+    Household(i64),
 }
 
 impl Target {
@@ -107,6 +155,13 @@ impl Target {
         match self {
             Target::Tile(x, y) => Some((x, y)),
             Target::Node(i) => world.nodes.get(i as usize).map(|n| (n.x, n.y)),
+            _ => None,
+        }
+    }
+
+    pub fn creature(self) -> Option<i64> {
+        match self {
+            Target::Creature(id) => Some(id),
             _ => None,
         }
     }
@@ -121,6 +176,9 @@ pub struct Step {
     /// Total taken so far by a multi-tick gather, so the event can be written
     /// once when the step finishes instead of once per tick.
     pub progress: f32,
+    /// What a SHARE_KNOWLEDGE step is about. §4.11 calls the topic filter half
+    /// of what makes sharing a decision rather than a transfer.
+    pub topic: Option<BeliefKind>,
     /// Remaining tiles of a movement, consumed one or more per tick according
     /// to speed. Computed once when the step is reached, not per tick.
     pub path: Vec<(u32, u32)>,
@@ -132,8 +190,13 @@ pub struct Step {
 
 impl Step {
     pub fn new(goal: Goal, target: Target, est_ticks: u32) -> Self {
-        Self { goal, target, est_ticks, elapsed: 0, progress: 0.0,
+        Self { goal, target, est_ticks, elapsed: 0, progress: 0.0, topic: None,
                path: Vec::new(), path_pos: 0, path_ready: false }
+    }
+
+    pub fn about(mut self, topic: BeliefKind) -> Self {
+        self.topic = Some(topic);
+        self
     }
 
     pub fn describe(&self, world: &World) -> String {
@@ -205,6 +268,24 @@ pub enum Outcome {
     Failed(AbortReason),
 }
 
+/// The read-only social surroundings: who else is here, which households
+/// exist, and who has been asked what. Bundled rather than passed as five
+/// arguments because every precondition below needs some of it.
+#[derive(Clone, Copy)]
+pub struct SocialView<'a> {
+    pub people: &'a CreatureIndex,
+    pub households: &'a Households,
+    pub courtships: &'a Courtships,
+}
+
+impl<'a> SocialView<'a> {
+    /// The other creature, if it is close enough to act on at all.
+    pub fn within_reach(&self, c: &Creature, id: i64, reach: u32) -> Option<Bystander> {
+        let p = self.people.get(id)?;
+        if near(p.x, p.y, c.x, c.y, reach) { Some(*p) } else { None }
+    }
+}
+
 /// Everything an action needs besides the creature itself. Held as separate
 /// borrows so a creature can be mutated while the world it acts on is too.
 pub struct ActionCtx<'a> {
@@ -219,6 +300,23 @@ pub struct ActionCtx<'a> {
     /// Food that spoiled and work that was done, accumulated for `tick_stats`.
     pub gathered: f32,
     pub eaten: f32,
+
+    // ---- society -------------------------------------------------------
+    pub households: &'a mut Households,
+    pub people: &'a CreatureIndex,
+    pub courtships: &'a Courtships,
+    /// Two-sided acts, applied in resolution where both parties are reachable.
+    pub intents: &'a mut Vec<SocialIntent>,
+}
+
+impl ActionCtx<'_> {
+    fn social(&self) -> SocialView<'_> {
+        SocialView {
+            people: self.people,
+            households: self.households,
+            courtships: self.courtships,
+        }
+    }
 }
 
 // --------------------------------------------------------------- preconditions
@@ -230,10 +328,18 @@ pub fn is_legal(
     target: Target,
     world: &World,
     structures: &Structures,
+    social: SocialView<'_>,
     cfg: &WorldConfig,
 ) -> bool {
     // Infants cannot gather or work; they follow a guardian and are fed (§4.7).
-    if !c.life_stage.can_work() && !matches!(goal, Goal::EatFromInventory | Goal::Rest | Goal::Shelter | Goal::MoveTo) {
+    // What they *can* do is eat, rest, take shelter and stay close to whoever
+    // is keeping them alive.
+    if !c.life_stage.can_work()
+        && !matches!(
+            goal,
+            Goal::EatFromInventory | Goal::Rest | Goal::Shelter | Goal::MoveTo | Goal::Follow
+        )
+    {
         return false;
     }
 
@@ -310,7 +416,127 @@ pub fn is_legal(
                             && near(s.x, s.y, c.x, c.y, 1)
                     }))
         }
+
+        // ---- society ----------------------------------------------------
+        //
+        // Courting is free and does not require a home. §4.8 gates
+        // *reproduction* on a shared shelter with capacity, not courtship —
+        // which is the right way round: a couple with nowhere to live has a
+        // reason to build one, whereas requiring the shelter first means
+        // nobody ever pairs and nobody ever needs a shelter.
+        Goal::Court => {
+            let reach = cfg.actions.social_reach;
+            c.is_courtable(&cfg.lifespan, 0)
+                && target.creature().is_some_and(|id| {
+                    social.within_reach(c, id, reach).is_some_and(|p| {
+                        p.sex != c.sex
+                            && !p.paired
+                            && p.life_stage == LifeStage::Adult
+                            && p.health > 40.0
+                    })
+                })
+        }
+
+        Goal::AcceptCourtship | Goal::RejectCourtship => {
+            c.mate_id.is_none()
+                && target.creature().is_some_and(|id| {
+                    social
+                        .courtships
+                        .pending_for(c.id)
+                        .is_some_and(|o| o.from == id)
+                        && social.within_reach(c, id, cfg.actions.social_reach).is_some()
+                })
+        }
+
+        Goal::GiveFood => {
+            c.inventory.total_food() > 0.0
+                && target
+                    .creature()
+                    .is_some_and(|id| social.within_reach(c, id, cfg.actions.social_reach).is_some())
+        }
+
+        // An infant must be fed by a parent or household member or it dies
+        // (§4.7). Anyone with food who is standing next to a hungry infant may
+        // do it; whether they choose to is the interesting part.
+        Goal::FeedInfant => {
+            c.inventory.total_food() > 0.0
+                && target.creature().is_some_and(|id| {
+                    social
+                        .within_reach(c, id, cfg.actions.social_reach)
+                        .is_some_and(|p| p.life_stage == LifeStage::Infant)
+                })
+        }
+
+        Goal::Follow => target.creature().is_some_and(|id| social.people.get(id).is_some()),
+
+        // Membership, not tonight's occupancy. This is what makes a household a
+        // thing you belong to rather than a bed you happen to be in.
+        Goal::JoinHousehold => {
+            c.household_id.is_none()
+                && matches!(target, Target::Household(id) if social.households.get(id).is_some())
+        }
+        Goal::LeaveHousehold => c.household_id.is_some(),
+
+        Goal::DepositToStore => {
+            c.inventory.weight() > 0.0 && at_own_hearth(c, social, structures, cfg)
+        }
+        Goal::WithdrawFromStore => {
+            has_carry_room(c, cfg)
+                && at_own_hearth(c, social, structures, cfg)
+                && c.household_id
+                    .and_then(|h| social.households.get(h))
+                    .is_some_and(|h| h.store.weight() > 0.0)
+        }
+        Goal::EatFromStore => {
+            at_own_hearth(c, social, structures, cfg)
+                && c.household_id
+                    .and_then(|h| social.households.get(h))
+                    .is_some_and(|h| h.stored_food() > 0.0)
+        }
+
+        // ---- knowledge transmission (§4.11) ------------------------------
+        Goal::ShareKnowledge => {
+            cfg.features.knowledge_sharing
+                && !c.beliefs.is_empty()
+                && target
+                    .creature()
+                    .is_some_and(|id| social.within_reach(c, id, cfg.actions.social_reach).is_some())
+        }
+
+        // Household-only, adult to young. The restriction is what makes
+        // teaching a thing a lineage does rather than a thing anybody does.
+        Goal::Teach => {
+            cfg.features.teaching
+                && c.life_stage != LifeStage::Infant
+                && !c.beliefs.is_empty()
+                && c.household_id.is_some()
+                && target.creature().is_some_and(|id| {
+                    social
+                        .within_reach(c, id, cfg.actions.social_reach.max(2))
+                        .is_some_and(|p| {
+                            p.household_id == c.household_id && p.life_stage != LifeStage::Elder
+                        })
+                })
+        }
     }
+}
+
+/// Standing at the shelter of the household this creature belongs to.
+fn at_own_hearth(
+    c: &Creature,
+    social: SocialView<'_>,
+    structures: &Structures,
+    cfg: &WorldConfig,
+) -> bool {
+    let Some(h) = c.household_id.and_then(|id| social.households.get(id)) else {
+        return false;
+    };
+    let Some(shelter_id) = h.shelter_id else {
+        return false;
+    };
+    structures
+        .get(shelter_id)
+        .is_some_and(|s| near(s.x, s.y, c.x, c.y, cfg.actions.social_reach.max(1)))
 }
 
 fn node_has(world: &World, target: Target, kind: NodeKind) -> bool {
@@ -354,6 +580,20 @@ pub fn execute(c: &mut Creature, step: &mut Step, ctx: &mut ActionCtx) -> Outcom
         Goal::TendCrop => tend(c, step, ctx),
         Goal::BuildShelter => build_shelter(c, step, ctx),
         Goal::RepairShelter => repair_shelter(c, step, ctx),
+
+        Goal::Court => court(c, step, ctx),
+        Goal::AcceptCourtship => answer_courtship(c, step, ctx, true),
+        Goal::RejectCourtship => answer_courtship(c, step, ctx, false),
+        Goal::GiveFood => hand_over(c, step, ctx, false),
+        Goal::FeedInfant => hand_over(c, step, ctx, true),
+        Goal::Follow => follow(c, step, ctx),
+        Goal::JoinHousehold => join_household(c, step, ctx),
+        Goal::LeaveHousehold => leave_household(c, ctx),
+        Goal::DepositToStore => deposit(c, ctx),
+        Goal::WithdrawFromStore => withdraw(c, ctx),
+        Goal::EatFromStore => eat_from_store(c, ctx),
+        Goal::ShareKnowledge => share_knowledge(c, step, ctx),
+        Goal::Teach => teach(c, step, ctx),
     };
 
     if step.goal.is_hazardous() && matches!(out, Outcome::Working | Outcome::StepComplete) {
@@ -744,6 +984,39 @@ fn build_shelter(c: &mut Creature, step: &mut Step, ctx: &mut ActionCtx) -> Outc
     }
 
     let spent = c.inventory.take(ItemKind::Wood, ctx.cfg.actions.shelter_wood_cost);
+
+    // Raising a roof founds a household, or gives an existing one its home.
+    //
+    // A shelter without a household is just a building: nothing can be stored
+    // in it, nobody belongs to it, and §4.8's reproduction gate — which reads a
+    // *household* store — can never be satisfied. So the two are created
+    // together, which is also what §4.10 means by "a shelter plus its members".
+    let household_id = match c.household_id {
+        Some(h) => {
+            if let Some(existing) = ctx.households.get_mut(h) {
+                if existing.shelter_id.is_none() {
+                    existing.shelter_id = None; // filled in below
+                    existing.dirty = true;
+                }
+            }
+            h
+        }
+        None => {
+            let h = ctx.households.found(None, c.id, c.mate_id, ctx.tick, ctx.cfg);
+            c.household_id = Some(h);
+            c.dirty = true;
+            ctx.events.push(
+                Event::new(ctx.tick, EventKind::HouseholdFounded, c.id).at(x, y).target(h),
+            );
+            // A mate is a member of the same household by definition.
+            if let Some(mate) = c.mate_id {
+                ctx.intents
+                    .push(SocialIntent::JoinHousehold { creature: mate, household: h });
+            }
+            h
+        }
+    };
+
     let id = ctx.structures.add(Structure {
         id: 0,
         kind: StructureKind::Shelter,
@@ -752,12 +1025,17 @@ fn build_shelter(c: &mut Creature, step: &mut Step, ctx: &mut ActionCtx) -> Outc
         condition: 1.0,
         capacity: ctx.cfg.actions.shelter_capacity,
         occupants: 0,
-        household_id: None,
+        household_id: Some(household_id),
         built_tick: ctx.tick,
         fuel_remaining: 0.0,
         lit_until_tick: None,
         dirty: true,
     });
+    if let Some(h) = ctx.households.get_mut(household_id) {
+        h.shelter_id = Some(id);
+        h.dirty = true;
+    }
+
     ctx.events.push(
         Event::new(ctx.tick, EventKind::ShelterBuilt, c.id)
             .at(x, y)
@@ -783,6 +1061,316 @@ fn repair_shelter(c: &mut Creature, step: &Step, ctx: &mut ActionCtx) -> Outcome
     ctx.events.push(
         Event::new(ctx.tick, EventKind::ShelterRepaired, c.id).at(s.x, s.y).target(id),
     );
+    Outcome::StepComplete
+}
+
+// ------------------------------------------------------------------ society
+
+/// Offer courtship. The answer belongs to the other creature (§4.8), so all
+/// this does is put the question.
+fn court(c: &mut Creature, step: &Step, ctx: &mut ActionCtx) -> Outcome {
+    let Some(to) = step.target.creature() else {
+        return Outcome::Failed(AbortReason::TargetGone);
+    };
+    if ctx.social().within_reach(c, to, ctx.cfg.actions.social_reach).is_none() {
+        return Outcome::Failed(AbortReason::TargetGone);
+    }
+    c.fatigue = (c.fatigue - 1.0).max(0.0);
+    ctx.intents.push(SocialIntent::Court { from: c.id, to });
+    ctx.events.push(
+        Event::new(ctx.tick, EventKind::Courted, c.id).at(c.x, c.y).target(to),
+    );
+    Outcome::StepComplete
+}
+
+fn answer_courtship(c: &mut Creature, step: &Step, ctx: &mut ActionCtx, accept: bool) -> Outcome {
+    let Some(from) = step.target.creature() else {
+        return Outcome::Failed(AbortReason::TargetGone);
+    };
+    // The offer may have lapsed, or the suitor may have paired with somebody
+    // else while this creature was thinking about it.
+    if ctx.courtships.pending_for(c.id).is_none_or(|o| o.from != from) {
+        return Outcome::Failed(AbortReason::TargetGone);
+    }
+    ctx.intents.push(if accept {
+        SocialIntent::Accept { from, to: c.id }
+    } else {
+        SocialIntent::Reject { from, to: c.id }
+    });
+    Outcome::StepComplete
+}
+
+/// Give food to somebody, or feed an infant.
+///
+/// The transfer itself happens in resolution, where both inventories are
+/// reachable — so food is never in limbo between a giver and a recipient who
+/// has since walked away or died.
+fn hand_over(c: &mut Creature, step: &Step, ctx: &mut ActionCtx, to_infant: bool) -> Outcome {
+    let Some(to) = step.target.creature() else {
+        return Outcome::Failed(AbortReason::TargetGone);
+    };
+    if ctx.social().within_reach(c, to, ctx.cfg.actions.social_reach).is_none() {
+        return Outcome::Failed(AbortReason::TargetGone);
+    }
+    if c.inventory.total_food() <= 0.0 {
+        return Outcome::Failed(AbortReason::PreconditionFailed);
+    }
+    let a = &ctx.cfg.actions;
+    let quantity = if to_infant { a.feed_infant_portion } else { a.give_food_portion };
+    ctx.intents.push(if to_infant {
+        SocialIntent::FeedInfant { from: c.id, to, quantity }
+    } else {
+        SocialIntent::GiveFood { from: c.id, to, quantity }
+    });
+    Outcome::StepComplete
+}
+
+/// Stay near a guardian. An infant's whole locomotion (§4.7).
+fn follow(c: &mut Creature, step: &mut Step, ctx: &mut ActionCtx) -> Outcome {
+    let Some(id) = step.target.creature() else {
+        return Outcome::Failed(AbortReason::TargetGone);
+    };
+    let Some(p) = ctx.people.get(id).copied() else {
+        // The guardian died. For an infant this is usually fatal, and it should
+        // be legible as that rather than as a creature standing still.
+        return Outcome::Failed(AbortReason::TargetGone);
+    };
+
+    let reach = ctx.cfg.actions.follow_distance;
+    if near(p.x, p.y, c.x, c.y, reach) {
+        return if step.elapsed >= step.est_ticks {
+            Outcome::StepComplete
+        } else {
+            Outcome::Working
+        };
+    }
+
+    // Step directly toward them rather than pathfinding: a guardian moves every
+    // tick, so any route computed now is stale before it is walked, and an
+    // infant is never more than a few tiles behind.
+    let dx = (p.x as i64 - c.x as i64).signum();
+    let dy = (p.y as i64 - c.y as i64).signum();
+    let (nx, ny) = (c.x as i64 + dx, c.y as i64 + dy);
+    if ctx.world.in_bounds(nx, ny) && ctx.world.at(nx as u32, ny as u32).passable() {
+        c.x = nx as u32;
+        c.y = ny as u32;
+    }
+    Outcome::Working
+}
+
+fn join_household(c: &mut Creature, step: &Step, ctx: &mut ActionCtx) -> Outcome {
+    let Target::Household(id) = step.target else {
+        return Outcome::Failed(AbortReason::TargetGone);
+    };
+    if ctx.households.get(id).is_none() {
+        return Outcome::Failed(AbortReason::TargetGone);
+    }
+    ctx.intents.push(SocialIntent::JoinHousehold { creature: c.id, household: id });
+    Outcome::StepComplete
+}
+
+fn leave_household(c: &mut Creature, ctx: &mut ActionCtx) -> Outcome {
+    if c.household_id.is_none() {
+        return Outcome::Failed(AbortReason::PreconditionFailed);
+    }
+    ctx.intents.push(SocialIntent::LeaveHousehold { creature: c.id });
+    Outcome::StepComplete
+}
+
+/// Put what you are carrying into the household store.
+///
+/// This is the act that makes a household more than a shared roof: the store is
+/// what the reproduction gate reads, and because only grain keeps, depositing
+/// grain is how a lineage becomes possible at all (§4.4, §4.8).
+fn deposit(c: &mut Creature, ctx: &mut ActionCtx) -> Outcome {
+    let Some(hid) = c.household_id else {
+        return Outcome::Failed(AbortReason::PreconditionFailed);
+    };
+    let want = ctx.cfg.actions.store_transfer;
+
+    // Grain first: it is the only thing that will still be there next week, and
+    // therefore the only thing a reserve can actually be made of.
+    //
+    // A creature keeps a meal in hand — banking everything and then starving on
+    // the walk to the woods helps nobody — but that meal is made of what will
+    // spoil anyway, not of the grain. Keeping four units of *every* kind meant
+    // grain was withheld from the store alongside the berries, which is exactly
+    // backwards: the berries are what you eat on the road and the grain is what
+    // the household is trying to accumulate.
+    let mut moved = 0.0;
+    let order = [ItemKind::Grain, ItemKind::Wood, ItemKind::Meat, ItemKind::Forage];
+    let perishable_in_hand = c.inventory.total(ItemKind::Forage) + c.inventory.total(ItemKind::Meat);
+    let mut taken: Vec<(ItemKind, f32, i64)> = Vec::new();
+    for kind in order {
+        if moved >= want {
+            break;
+        }
+        // Hold back a meal, made of whatever is closest to spoiling. If there
+        // are no perishables to keep, hold back a little grain instead.
+        let keep = match kind {
+            ItemKind::Forage | ItemKind::Meat => 4.0,
+            ItemKind::Grain if perishable_in_hand < 4.0 => 4.0 - perishable_in_hand,
+            _ => 0.0,
+        };
+        let held = c.inventory.total(kind);
+        let spare = (held - keep).min(want - moved);
+        if spare <= 0.01 {
+            continue;
+        }
+        let oldest = c
+            .inventory
+            .batches
+            .iter()
+            .filter(|b| b.kind == kind)
+            .map(|b| b.harvested_tick)
+            .min()
+            .unwrap_or(ctx.tick);
+        let got = c.inventory.take(kind, spare);
+        if got > 0.0 {
+            taken.push((kind, got, oldest));
+            moved += got;
+        }
+    }
+
+    if taken.is_empty() {
+        return Outcome::Failed(AbortReason::PreconditionFailed);
+    }
+    let Some(h) = ctx.households.get_mut(hid) else {
+        return Outcome::Failed(AbortReason::TargetGone);
+    };
+    for (kind, qty, harvested) in &taken {
+        // The batch keeps its original harvest tick, so depositing does not
+        // reset the clock on something that was already going off.
+        h.store.add(*kind, *qty, *harvested);
+    }
+    h.dirty = true;
+
+    ctx.events.push(
+        Event::new(ctx.tick, EventKind::Deposited, c.id)
+            .at(c.x, c.y)
+            .target(hid)
+            .with_num("qty", moved),
+    );
+    Outcome::StepComplete
+}
+
+fn withdraw(c: &mut Creature, ctx: &mut ActionCtx) -> Outcome {
+    let Some(hid) = c.household_id else {
+        return Outcome::Failed(AbortReason::PreconditionFailed);
+    };
+    let room = (c.carry_capacity(ctx.cfg) - c.inventory.weight()).max(0.0);
+    let want = ctx.cfg.actions.store_transfer.min(room);
+    if want <= 0.01 {
+        return Outcome::Failed(AbortReason::Encumbered);
+    }
+    let Some(h) = ctx.households.get_mut(hid) else {
+        return Outcome::Failed(AbortReason::TargetGone);
+    };
+
+    // Perishables out first: what is about to rot is what should be walking
+    // around in somebody's pack, not sitting in the store.
+    let mut moved = 0.0;
+    for kind in [ItemKind::Forage, ItemKind::Meat, ItemKind::Grain] {
+        if moved >= want {
+            break;
+        }
+        let oldest = h
+            .store
+            .batches
+            .iter()
+            .filter(|b| b.kind == kind)
+            .map(|b| b.harvested_tick)
+            .min();
+        let got = h.store.take(kind, want - moved);
+        if got > 0.0 {
+            c.inventory.add(kind, got, oldest.unwrap_or(ctx.tick));
+            moved += got;
+        }
+    }
+    h.dirty = true;
+
+    if moved <= 0.0 {
+        return Outcome::Failed(AbortReason::TargetDepleted);
+    }
+    ctx.events.push(
+        Event::new(ctx.tick, EventKind::Withdrew, c.id)
+            .at(c.x, c.y)
+            .target(hid)
+            .with_num("qty", moved),
+    );
+    Outcome::StepComplete
+}
+
+fn eat_from_store(c: &mut Creature, ctx: &mut ActionCtx) -> Outcome {
+    let Some(hid) = c.household_id else {
+        return Outcome::Failed(AbortReason::PreconditionFailed);
+    };
+    let portion = ctx.cfg.actions.eat_portion;
+    let Some(h) = ctx.households.get_mut(hid) else {
+        return Outcome::Failed(AbortReason::TargetGone);
+    };
+
+    let Some(oldest) = h.store.oldest_food().copied() else {
+        return Outcome::Failed(AbortReason::TargetDepleted);
+    };
+    let got = h.store.take(oldest.kind, portion.min(oldest.quantity));
+    if got <= 0.0 {
+        return Outcome::Failed(AbortReason::TargetDepleted);
+    }
+    h.dirty = true;
+
+    c.hunger = (c.hunger + got * oldest.kind.nutrition()).min(100.0);
+    ctx.eaten += got;
+    ctx.events.push(
+        Event::new(ctx.tick, EventKind::Ate, c.id)
+            .at(c.x, c.y)
+            .with("kind", oldest.kind.as_str())
+            .with("from", "store")
+            .with_num("qty", got),
+    );
+    Outcome::StepComplete
+}
+
+// ------------------------------------------------ knowledge transmission
+
+/// Tell somebody something. One tick, small fatigue, topic-filtered (§4.11).
+///
+/// None of this costs an LLM call at M3 either: the topic and the recipient are
+/// chosen inside a deliberation the creature was going to make anyway, and the
+/// transfer itself is a set merge. Communication is nearly free in the budget
+/// that actually matters.
+fn share_knowledge(c: &mut Creature, step: &Step, ctx: &mut ActionCtx) -> Outcome {
+    let Some(to) = step.target.creature() else {
+        return Outcome::Failed(AbortReason::TargetGone);
+    };
+    if ctx.social().within_reach(c, to, ctx.cfg.actions.social_reach).is_none() {
+        return Outcome::Failed(AbortReason::TargetGone);
+    }
+    let topic = step.topic;
+    c.fatigue = (c.fatigue - ctx.cfg.knowledge.share_fatigue).max(0.0);
+    ctx.intents.push(SocialIntent::Share { from: c.id, to, topic });
+    Outcome::StepComplete
+}
+
+/// A bulk, high-fidelity transfer to a young household member.
+///
+/// Expensive in exactly the way that matters: an adult spending six ticks
+/// teaching is six ticks not gathering, and the payoff arrives after the
+/// teacher is dead. Whether a creature ever chooses to do it is §13.5's open
+/// question, and the answer is a measurement rather than a design decision —
+/// which is why nothing here makes it automatic between parent and child.
+fn teach(c: &mut Creature, step: &mut Step, ctx: &mut ActionCtx) -> Outcome {
+    let Some(to) = step.target.creature() else {
+        return Outcome::Failed(AbortReason::TargetGone);
+    };
+    if ctx.social().within_reach(c, to, ctx.cfg.actions.social_reach.max(2)).is_none() {
+        return Outcome::Failed(AbortReason::TargetGone);
+    }
+    if step.elapsed < ctx.cfg.knowledge.teach_ticks {
+        return Outcome::Working;
+    }
+    c.fatigue = (c.fatigue - ctx.cfg.knowledge.teach_fatigue).max(0.0);
+    ctx.intents.push(SocialIntent::Teach { from: c.id, to });
     Outcome::StepComplete
 }
 
@@ -831,12 +1419,17 @@ mod tests {
         cfg: WorldConfig,
         rng: ChaCha8Rng,
         events: Vec<Event>,
+        households: Households,
+        people: CreatureIndex,
+        courtships: Courtships,
+        intents: Vec<SocialIntent>,
     }
 
     impl Harness {
         fn new(t: Terrain) -> Self {
             let world = world_of(t);
             let pathfinder = Pathfinder::new(&world);
+            let people = CreatureIndex::new(world.width, world.height, 8);
             Self {
                 world,
                 structures: Structures::new(),
@@ -844,6 +1437,23 @@ mod tests {
                 cfg: WorldConfig::default(),
                 rng: ChaCha8Rng::seed_from_u64(7),
                 events: Vec::new(),
+                households: Households::new(),
+                people,
+                courtships: Courtships::new(),
+                intents: Vec::new(),
+            }
+        }
+
+        /// Put these creatures on the map so social actions can find them.
+        fn populate(&mut self, creatures: &[Creature]) {
+            self.people.rebuild(creatures.iter(), 0, &self.cfg.knowledge);
+        }
+
+        fn social(&self) -> SocialView<'_> {
+            SocialView {
+                people: &self.people,
+                households: &self.households,
+                courtships: &self.courtships,
             }
         }
 
@@ -859,6 +1469,10 @@ mod tests {
                 night,
                 gathered: 0.0,
                 eaten: 0.0,
+                households: &mut self.households,
+                people: &self.people,
+                courtships: &self.courtships,
+                intents: &mut self.intents,
             }
         }
     }
@@ -1096,15 +1710,17 @@ mod tests {
         let world = world_of(Terrain::Grass);
         let st = Structures::new();
         let cfg = WorldConfig::default();
+        let (hh, ppl, cs) = (Households::new(), CreatureIndex::new(32, 32, 8), Courtships::new());
+        let social = SocialView { people: &ppl, households: &hh, courtships: &cs };
         let mut c = test_creature();
         c.life_stage = LifeStage::Infant;
         c.inventory.add(ItemKind::Wood, 20.0, 0);
 
-        assert!(!is_legal(&c, Goal::ChopWood, Target::Node(0), &world, &st, &cfg));
-        assert!(!is_legal(&c, Goal::BuildShelter, Target::Tile(1, 1), &world, &st, &cfg));
+        assert!(!is_legal(&c, Goal::ChopWood, Target::Node(0), &world, &st, social, &cfg));
+        assert!(!is_legal(&c, Goal::BuildShelter, Target::Tile(1, 1), &world, &st, social, &cfg));
         c.inventory.add(ItemKind::Forage, 2.0, 0);
-        assert!(is_legal(&c, Goal::EatFromInventory, Target::None, &world, &st, &cfg));
-        assert!(is_legal(&c, Goal::Rest, Target::None, &world, &st, &cfg));
+        assert!(is_legal(&c, Goal::EatFromInventory, Target::None, &world, &st, social, &cfg));
+        assert!(is_legal(&c, Goal::Rest, Target::None, &world, &st, social, &cfg));
     }
 
     #[test]
@@ -1116,15 +1732,17 @@ mod tests {
         });
         let st = Structures::new();
         let cfg = WorldConfig::default();
+        let (hh, ppl, cs) = (Households::new(), CreatureIndex::new(32, 32, 8), Courtships::new());
+        let social = SocialView { people: &ppl, households: &hh, courtships: &cs };
         let c = test_creature();
 
-        assert!(!is_legal(&c, Goal::GatherForage, Target::Node(0), &world, &st, &cfg),
+        assert!(!is_legal(&c, Goal::GatherForage, Target::Node(0), &world, &st, social, &cfg),
                 "an empty node is not a legal gather");
-        assert!(!is_legal(&c, Goal::Drink, Target::Tile(1, 1), &world, &st, &cfg),
+        assert!(!is_legal(&c, Goal::Drink, Target::Tile(1, 1), &world, &st, social, &cfg),
                 "dry land is not a legal drink");
-        assert!(!is_legal(&c, Goal::BuildFire, Target::None, &world, &st, &cfg),
+        assert!(!is_legal(&c, Goal::BuildFire, Target::None, &world, &st, social, &cfg),
                 "no wood, no fire");
-        assert!(!is_legal(&c, Goal::EatFromInventory, Target::None, &world, &st, &cfg),
+        assert!(!is_legal(&c, Goal::EatFromInventory, Target::None, &world, &st, social, &cfg),
                 "an empty pack is not a meal");
     }
 
@@ -1137,12 +1755,14 @@ mod tests {
         });
         let st = Structures::new();
         let mut cfg = WorldConfig::default();
+        let (hh, ppl, cs) = (Households::new(), CreatureIndex::new(32, 32, 8), Courtships::new());
+        let social = SocialView { people: &ppl, households: &hh, courtships: &cs };
         let c = test_creature();
 
-        assert!(is_legal(&c, Goal::HarvestWheat, Target::Node(0), &world, &st, &cfg));
+        assert!(is_legal(&c, Goal::HarvestWheat, Target::Node(0), &world, &st, social, &cfg));
         cfg.features.wheat = false;
-        assert!(!is_legal(&c, Goal::HarvestWheat, Target::Node(0), &world, &st, &cfg));
-        assert!(!is_legal(&c, Goal::PlantWheat, Target::Tile(5, 5), &world, &st, &cfg));
+        assert!(!is_legal(&c, Goal::HarvestWheat, Target::Node(0), &world, &st, social, &cfg));
+        assert!(!is_legal(&c, Goal::PlantWheat, Target::Tile(5, 5), &world, &st, social, &cfg));
     }
 
     #[test]
@@ -1164,6 +1784,140 @@ mod tests {
             c.fatigue
         };
         assert!(restore(true) > restore(false), "shelter is worth sleeping in");
+    }
+
+    /// A creature with a household, standing at its shelter.
+    fn householder(h: &mut Harness) -> Creature {
+        let mut c = test_creature();
+        (c.x, c.y) = (10, 10);
+        let shelter = h.structures.add(Structure {
+            id: 0, kind: StructureKind::Shelter, x: 10, y: 10,
+            condition: 1.0, capacity: 6, occupants: 0, household_id: None,
+            built_tick: 0, fuel_remaining: 0.0, lit_until_tick: None, dirty: false,
+        });
+        let hid = h.households.found(Some(shelter), c.id, None, 0, &h.cfg);
+        c.household_id = Some(hid);
+        c
+    }
+
+    #[test]
+    fn a_social_action_needs_somebody_within_reach() {
+        // Every social act reaches into another creature, so "is anybody
+        // actually there" is the first precondition all of them share.
+        let mut h = Harness::new(Terrain::Grass);
+        let mut a = test_creature();
+        a.id = 1;
+        (a.x, a.y) = (10, 10);
+        a.inventory.add(ItemKind::Forage, 5.0, 0);
+        let mut far = test_creature();
+        far.id = 2;
+        (far.x, far.y) = (25, 25);
+
+        h.populate(&[a.clone(), far]);
+        assert!(
+            !is_legal(&a, Goal::GiveFood, Target::Creature(2), &h.world, &h.structures,
+                      h.social(), &h.cfg),
+            "you cannot hand food to somebody fifteen tiles away"
+        );
+
+        let mut near = test_creature();
+        near.id = 2;
+        (near.x, near.y) = (11, 10);
+        h.populate(&[a.clone(), near]);
+        assert!(is_legal(&a, Goal::GiveFood, Target::Creature(2), &h.world, &h.structures,
+                         h.social(), &h.cfg));
+    }
+
+    #[test]
+    fn depositing_moves_food_from_the_pack_into_the_household_store() {
+        let mut h = Harness::new(Terrain::Grass);
+        let mut c = householder(&mut h);
+        c.inventory.add(ItemKind::Grain, 16.0, 0);
+
+        let mut step = Step::new(Goal::DepositToStore, Target::None, 1);
+        assert_eq!(execute(&mut c, &mut step, &mut h.ctx(5, false)), Outcome::StepComplete);
+
+        let hid = c.household_id.unwrap();
+        let stored = h.households.get(hid).unwrap().store.total(ItemKind::Grain);
+        assert!(stored > 0.0, "nothing reached the store");
+        assert!(
+            (stored + c.inventory.total(ItemKind::Grain) - 16.0).abs() < 1e-3,
+            "nothing is created or destroyed: {stored} stored, {} kept",
+            c.inventory.total(ItemKind::Grain)
+        );
+        assert!(
+            c.inventory.total(ItemKind::Grain) >= 4.0,
+            "a creature keeps a meal in hand rather than banking everything and starving"
+        );
+    }
+
+    #[test]
+    fn a_deposit_moves_a_useful_share_of_a_full_pack() {
+        // The reproduction gate reads a household store of 20 (§4.8). If one
+        // trip home moves a trickle, the reserve is never reached and no
+        // household ever has a child — which is exactly what a measured run
+        // showed before `store_transfer` was raised.
+        let mut h = Harness::new(Terrain::Grass);
+        let mut c = householder(&mut h);
+        c.inventory.add(ItemKind::Grain, 18.0, 0);
+
+        let mut step = Step::new(Goal::DepositToStore, Target::None, 1);
+        execute(&mut c, &mut step, &mut h.ctx(5, false));
+
+        let stored = h.households.get(c.household_id.unwrap()).unwrap().stored_food();
+        assert!(stored >= h.cfg.actions.store_transfer - 0.01,
+                "one trip should bank a load, moved {stored}");
+    }
+
+    #[test]
+    fn grain_is_banked_before_anything_that_will_rot() {
+        // Only grain keeps, so grain is what the reserve is actually made of.
+        let mut h = Harness::new(Terrain::Grass);
+        let mut c = householder(&mut h);
+        c.inventory.add(ItemKind::Forage, 20.0, 0);
+        c.inventory.add(ItemKind::Grain, 10.0, 0);
+
+        let mut step = Step::new(Goal::DepositToStore, Target::None, 1);
+        execute(&mut c, &mut step, &mut h.ctx(5, false));
+
+        let store = &h.households.get(c.household_id.unwrap()).unwrap().store;
+        assert!(store.total(ItemKind::Grain) > store.total(ItemKind::Forage),
+                "grain {} should outrank forage {}",
+                store.total(ItemKind::Grain), store.total(ItemKind::Forage));
+    }
+
+    #[test]
+    fn eating_from_the_store_feeds_the_creature_and_empties_the_store() {
+        let mut h = Harness::new(Terrain::Grass);
+        let mut c = householder(&mut h);
+        c.hunger = 30.0;
+        let hid = c.household_id.unwrap();
+        h.households.get_mut(hid).unwrap().store.add(ItemKind::Grain, 10.0, 0);
+
+        let mut step = Step::new(Goal::EatFromStore, Target::None, 1);
+        assert_eq!(execute(&mut c, &mut step, &mut h.ctx(5, false)), Outcome::StepComplete);
+
+        assert!(c.hunger > 30.0);
+        assert!(h.households.get(hid).unwrap().store.total(ItemKind::Grain) < 10.0);
+    }
+
+    #[test]
+    fn raising_a_shelter_founds_a_household_to_go_with_it() {
+        // §4.10: a household is a shelter *plus its members*. A shelter with no
+        // household has nowhere to put anything, and §4.8's gate reads a
+        // household store — so the two have to arrive together.
+        let mut h = Harness::new(Terrain::Grass);
+        let mut c = test_creature();
+        c.inventory.add(ItemKind::Wood, 30.0, 0);
+        let ticks = h.cfg.actions.shelter_build_ticks as i64;
+        let mut step = Step::new(Goal::BuildShelter, Target::Tile(c.x, c.y), ticks as u32);
+        for t in 1..=ticks {
+            execute(&mut c, &mut step, &mut h.ctx(t, false));
+        }
+
+        let hid = c.household_id.expect("building a home should found a household");
+        let household = h.households.get(hid).expect("household exists");
+        assert!(household.shelter_id.is_some(), "and it knows where it lives");
     }
 
     #[test]

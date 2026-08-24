@@ -165,6 +165,27 @@ pub struct CreatureDetail {
     pub belief_count: usize,
     pub lifetime_deliberations: i64,
     pub sheltered: bool,
+
+    // ---- society ---------------------------------------------------------
+    pub household_id: Option<i64>,
+    pub household_store: f32,
+    pub household_grain: f32,
+    pub household_members: u32,
+    pub mate: Option<(i64, String)>,
+    pub mother: Option<(i64, String)>,
+    pub father: Option<(i64, String)>,
+    pub children_born: i32,
+    pub taught_count: i32,
+    pub shared_count: i32,
+    /// Ticks until the child arrives, if there is one on the way.
+    pub expecting_in: Option<i64>,
+    /// Which of §4.8's requirements is currently missing, in plain language.
+    /// "needs 6 more grain" is a story; "cannot reproduce" is not.
+    pub cannot_yet: Option<String>,
+    /// Beliefs this creature holds that somebody else discovered, and how many
+    /// of those discoverers are already dead — S7, per creature.
+    pub inherited_beliefs: u32,
+    pub from_the_dead: u32,
 }
 
 /// Terrain and the things that only change when the world does. Published once
@@ -214,6 +235,16 @@ pub struct Snapshot {
     /// one.
     pub population_maintained: bool,
 
+    // ---- society ---------------------------------------------------------
+    pub households: u32,
+    pub households_at_reserve: u32,
+    pub mean_store: f32,
+    pub paired: u32,
+    pub expecting: u32,
+    pub deepest_generation: i32,
+    pub beliefs_taught: u64,
+    pub beliefs_shared: u64,
+
     pub creatures: Vec<CreatureDot>,
     pub structures: Vec<StructureDot>,
     pub events: Vec<TickerLine>,
@@ -245,6 +276,9 @@ impl Default for Snapshot {
             deaths_by_cause: Vec::new(),
             tick_ms: 0.0, timings: PhaseTimings::default(), ticks_per_second: 0.0,
             population_maintained: false,
+            households: 0, households_at_reserve: 0, mean_store: 0.0,
+            paired: 0, expecting: 0, deepest_generation: 1,
+            beliefs_taught: 0, beliefs_shared: 0,
             creatures: Vec::new(), structures: Vec::new(), events: Vec::new(),
             selected: None, nodes_version: 0,
             known: Vec::new(), known_dim: 0, known_cell: 8,
@@ -315,6 +349,8 @@ pub struct SimThread {
     ticker: std::collections::VecDeque<TickerLine>,
     nodes_version: u64,
     last_emit: Instant,
+    taught_total: u64,
+    shared_total: u64,
     last_nodes_publish: Instant,
     recent_tick_us: std::collections::VecDeque<u64>,
 }
@@ -342,6 +378,8 @@ impl SimThread {
             ticker: std::collections::VecDeque::with_capacity(64),
             nodes_version: 1,
             last_emit: Instant::now(),
+            taught_total: 0,
+            shared_total: 0,
             last_nodes_publish: Instant::now(),
             recent_tick_us: std::collections::VecDeque::with_capacity(64),
         }
@@ -382,6 +420,8 @@ impl SimThread {
             }
             let elapsed = started.elapsed();
 
+            self.taught_total += report.beliefs_taught as u64;
+            self.shared_total += report.beliefs_shared as u64;
             self.recent_tick_us.push_back(elapsed.as_micros() as u64);
             if self.recent_tick_us.len() > 64 {
                 self.recent_tick_us.pop_front();
@@ -613,6 +653,22 @@ impl SimThread {
         let selected = self.selected.and_then(|id| self.detail_for(id));
         let (known, known_dim, known_cell) = self.collective_map();
 
+        let reserve = cfg.reproduction.store_reserve;
+        let live: Vec<&crate::sim::social::Household> =
+            self.sim.households.items.iter().filter(|h| h.is_alive()).collect();
+        let live_households = live.len();
+        let at_reserve = live.iter().filter(|h| h.stored_food() >= reserve).count() as u32;
+        let mean_store = if live_households == 0 {
+            0.0
+        } else {
+            live.iter().map(|h| h.stored_food()).sum::<f32>() / live_households as f32
+        };
+        let paired = self.sim.creatures.iter().filter(|c| c.mate_id.is_some()).count() as u32;
+        let expecting =
+            self.sim.creatures.iter().filter(|c| c.pregnancy.is_some()).count() as u32;
+        let deepest_generation =
+            self.sim.creatures.iter().map(|c| c.generation).max().unwrap_or(1);
+
         let snapshot = Arc::new(Snapshot {
             tick,
             day: economy::day_of(tick),
@@ -634,6 +690,14 @@ impl SimThread {
             timings: report.timings,
             ticks_per_second: if mean_us > 0.0 { 1_000_000.0 / mean_us } else { 0.0 },
             population_maintained: self.sim.population_maintained,
+            households: live_households as u32,
+            households_at_reserve: at_reserve,
+            mean_store,
+            paired,
+            expecting,
+            deepest_generation,
+            beliefs_taught: self.taught_total,
+            beliefs_shared: self.shared_total,
             creatures,
             structures,
             events: self.ticker.iter().cloned().collect(),
@@ -758,6 +822,50 @@ impl SimThread {
             None => (Vec::new(), String::new(), "None".into(), 0, 0, 1),
         };
 
+        let name_of = |id: i64| {
+            self.sim.creatures.iter().find(|o| o.id == id).map(|o| (id, o.name.clone()))
+        };
+        let household = c.household_id.and_then(|h| self.sim.households.get(h));
+        let members = c
+            .household_id
+            .map(|h| self.sim.creatures.iter().filter(|o| o.household_id == Some(h)).count())
+            .unwrap_or(0) as u32;
+
+        // Why not yet? Only meaningful for a paired female; for anyone else the
+        // answer is a different question and saying "not paired" to a bachelor
+        // is not information.
+        let cannot_yet = c.mate_id.and_then(|mate| {
+            let partner = self.sim.creatures.iter().find(|o| o.id == mate)?;
+            let (mother, father) = if c.sex == crate::sim::creature::Sex::Female {
+                (c, partner)
+            } else {
+                (partner, c)
+            };
+            let blocker = crate::sim::social::conception_blocker(
+                mother, father, household, cfg, tick,
+            )?;
+            Some(match blocker {
+                crate::sim::social::Blocker::StoreShort => {
+                    let short = cfg.reproduction.store_reserve
+                        - household.map(|h| h.stored_food()).unwrap_or(0.0);
+                    format!("needs {:.0} more put by", short.max(0.0))
+                }
+                other => other.as_str().to_string(),
+            })
+        });
+
+        let dead = |id: i64| !self.sim.creatures.iter().any(|o| o.id == id);
+        let inherited_beliefs = c
+            .beliefs
+            .iter()
+            .filter(|b| b.origin_creature_id.is_some_and(|o| o != c.id))
+            .count() as u32;
+        let from_the_dead = c
+            .beliefs
+            .iter()
+            .filter(|b| b.origin_creature_id.is_some_and(|o| o != c.id && dead(o)))
+            .count() as u32;
+
         Some(CreatureDetail {
             id: c.id,
             name: c.name.clone(),
@@ -786,6 +894,21 @@ impl SimThread {
             belief_count: c.beliefs.len(),
             lifetime_deliberations: c.lifetime_deliberations,
             sheltered: c.in_shelter.is_some(),
+
+            household_id: c.household_id,
+            household_store: household.map(|h| h.stored_food()).unwrap_or(0.0),
+            household_grain: household.map(|h| h.grain()).unwrap_or(0.0),
+            household_members: members,
+            mate: c.mate_id.and_then(name_of),
+            mother: c.mother_id.and_then(name_of),
+            father: c.father_id.and_then(name_of),
+            children_born: c.children_born,
+            taught_count: c.taught_count,
+            shared_count: c.shared_count,
+            expecting_in: c.pregnancy.map(|p| p.due_tick - tick),
+            cannot_yet,
+            inherited_beliefs,
+            from_the_dead,
         })
     }
 

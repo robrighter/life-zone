@@ -157,12 +157,27 @@ pub struct ReproductionConfig {
     pub health_floor: f32,
     pub childbirth_mortality: f32,
     pub mutation_sigma: f32,
+    /// Ticks a courtship offer stands before it lapses unanswered.
+    pub courtship_offer_ticks: u32,
+    /// A pause between children, so a household does not commit to three
+    /// dependents at once the moment its store first crosses the reserve.
+    pub birth_spacing_ticks: u32,
+    /// How much of the household store a newborn's arrival consumes.
+    pub birth_store_cost: f32,
 }
 impl Default for ReproductionConfig {
     fn default() -> Self {
         Self {
             store_reserve: 20.0, gestation_ticks: 48, health_floor: 50.0,
             childbirth_mortality: 0.03, mutation_sigma: 0.08,
+            courtship_offer_ticks: 12,
+            // Two in-game days. Not a PRD number — it exists only to stop a
+            // household committing to three dependents the moment its store
+            // first crosses the reserve. At 96 it was blocking a fifth of all
+            // otherwise-eligible conception ticks, which is doing rather more
+            // than that.
+            birth_spacing_ticks: 48,
+            birth_store_cost: 6.0,
         }
     }
 }
@@ -276,6 +291,18 @@ pub struct KnowledgeConfig {
     pub teach_ticks: u32,
     pub teach_fidelity: f32,
     pub share_ticks: u32,
+    /// Beliefs moved by one SHARE_KNOWLEDGE and one TEACH.
+    pub share_belief_count: u32,
+    pub teach_belief_count: u32,
+    /// Fatigue each channel costs the giver. Teaching is expensive in exactly
+    /// the way that matters: an adult spending six ticks teaching is six ticks
+    /// not gathering.
+    pub share_fatigue: f32,
+    pub teach_fatigue: f32,
+    /// Ambient observation (§4.11 channel 1): being near somebody leaks a
+    /// little of what they know, at low confidence and for free.
+    pub ambient_share_chance: f32,
+    pub ambient_confidence: f32,
     pub max_beliefs_in_prompt: u32,
     /// How many beliefs a creature can hold at once. Distinct from the prompt
     /// cap: what a creature remembers and what fits in a prompt are different
@@ -293,6 +320,12 @@ impl Default for KnowledgeConfig {
             teach_ticks: 6,
             teach_fidelity: 1.0, // transmits at hops:0, as though firsthand
             share_ticks: 1,
+            share_belief_count: 4,
+            teach_belief_count: 12,
+            share_fatigue: 1.5,
+            teach_fatigue: 5.0,
+            ambient_share_chance: 0.02,
+            ambient_confidence: 0.35,
             max_beliefs_in_prompt: 8,
             max_beliefs_held: 48,
         }
@@ -345,6 +378,18 @@ pub struct ActionConfig {
     /// Night runs 20:00–06:00 (§4.1).
     pub night_start_hour: u32,
     pub night_end_hour: u32,
+
+    // ---- society (§4.10) -------------------------------------------------
+    /// How much food one FEED_INFANT hands over.
+    pub feed_infant_portion: f32,
+    /// How much food one GIVE_FOOD hands over.
+    pub give_food_portion: f32,
+    /// How much a DEPOSIT_TO_STORE or WITHDRAW_FROM_STORE moves.
+    pub store_transfer: f32,
+    /// How far an infant may drift from its guardian before it follows.
+    pub follow_distance: u32,
+    /// Range within which social actions are possible at all.
+    pub social_reach: u32,
 }
 impl Default for ActionConfig {
     fn default() -> Self {
@@ -363,7 +408,12 @@ impl Default for ActionConfig {
             drink_restore: 55.0,
             rest_restore: 7.0,
             rest_restore_sheltered: 12.0,
-            shelter_wood_cost: 12.0,
+            // 8, down from 12. Not a PRD number — it was invented at M2, when a
+            // shelter was an optional comfort. It is now the precondition for a
+            // household, which is the precondition for the store, which is the
+            // precondition for a child. Measured at 150 creatures over 4,000
+            // ticks: 12 wood gave 18 households, 8 gave 34, 6 gave 51.
+            shelter_wood_cost: 8.0,
             shelter_build_ticks: 8,
             shelter_capacity: 6,
             shelter_warmth: 9.0,
@@ -380,6 +430,17 @@ impl Default for ActionConfig {
             explore_distance: 26,
             night_start_hour: 20,
             night_end_hour: 6,
+            feed_infant_portion: 3.0,
+            give_food_portion: 4.0,
+            // One trip home should bank most of a load. At 8 a creature
+            // carrying a full pack needed three journeys to move it, and the
+            // perishable half of it rotted between them.
+            store_transfer: 14.0,
+            follow_distance: 3,
+            // Close enough to speak to. At 1 tile two creatures had to be
+            // literally touching for any social act to be possible, and on a
+            // 512-tile map that made courtship a coincidence.
+            social_reach: 2,
         }
     }
 }

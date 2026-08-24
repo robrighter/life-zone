@@ -8,6 +8,7 @@ pub mod knowledge;
 pub mod noise;
 pub mod pathfind;
 pub mod perception;
+pub mod social;
 pub mod runner;
 pub mod terrain;
 pub mod tick;

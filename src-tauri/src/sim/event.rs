@@ -42,6 +42,26 @@ pub enum EventKind {
     Injured,
     FellIll,
     Settled,
+    // ---- society
+    Courted,
+    Paired,
+    Rejected,
+    Conceived,
+    Miscarried,
+    GaveFood,
+    FedInfant,
+    Deposited,
+    Withdrew,
+    HouseholdFounded,
+    HouseholdJoined,
+    HouseholdLeft,
+    HouseholdDissolved,
+    Inherited,
+    Orphaned,
+    // ---- knowledge transmission
+    Shared,
+    Taught,
+    Overheard,
 }
 
 impl EventKind {
@@ -76,6 +96,24 @@ impl EventKind {
             EventKind::Injured => "INJURED",
             EventKind::FellIll => "FELL_ILL",
             EventKind::Settled => "SETTLED",
+            EventKind::Courted => "COURTED",
+            EventKind::Paired => "PAIRED",
+            EventKind::Rejected => "REJECTED",
+            EventKind::Conceived => "CONCEIVED",
+            EventKind::Miscarried => "MISCARRIED",
+            EventKind::GaveFood => "GAVE_FOOD",
+            EventKind::FedInfant => "FED_INFANT",
+            EventKind::Deposited => "DEPOSITED",
+            EventKind::Withdrew => "WITHDREW",
+            EventKind::HouseholdFounded => "HOUSEHOLD_FOUNDED",
+            EventKind::HouseholdJoined => "HOUSEHOLD_JOINED",
+            EventKind::HouseholdLeft => "HOUSEHOLD_LEFT",
+            EventKind::HouseholdDissolved => "HOUSEHOLD_DISSOLVED",
+            EventKind::Inherited => "INHERITED",
+            EventKind::Orphaned => "ORPHANED",
+            EventKind::Shared => "SHARED",
+            EventKind::Taught => "TAUGHT",
+            EventKind::Overheard => "OVERHEARD",
         }
     }
 }

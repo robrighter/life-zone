@@ -63,6 +63,7 @@ export default function App() {
     return () => { un.then((f) => f()); };
   }, []);
 
+
   // Resource nodes change as crops are planted and patches are stripped, but
   // far more slowly than creatures move, so they come over separately when the
   // sim says they have changed.
@@ -171,6 +172,12 @@ export default function App() {
             <span className="eyebrow">Buried</span>
             <span className="val still">{snap?.died ?? 0}</span>
           </div>
+          {/* The stated goal of the game is lineage depth, so it goes where the
+              population count goes rather than three panels down. */}
+          <div className="readout">
+            <span className="eyebrow">Generation</span>
+            <span className="val quick">{snap?.deepest_generation ?? 1}</span>
+          </div>
         </div>
       </header>
 
@@ -276,6 +283,24 @@ export default function App() {
               <dt>Elders</dt><dd className="num">{snap?.elders ?? 0}</dd>
               <dt>Shelters</dt><dd className="num">{snap?.shelters ?? 0}</dd>
               <dt>Fires lit</dt><dd className="num">{snap?.fires_lit ?? 0}</dd>
+            </dl>
+            <dl className="kv" style={{ marginTop: 8 }}>
+              <dt>Paired</dt><dd className="num">{snap?.paired ?? 0}</dd>
+              <dt>Expecting</dt>
+              <dd className="num quick">{snap?.expecting ?? 0}</dd>
+              <dt>Households</dt><dd className="num">{snap?.households ?? 0}</dd>
+              {/* Only grain keeps, so only a household above the reserve can
+                  have a child. This is the number that predicts births. */}
+              <dt>At reserve</dt>
+              <dd className="num">
+                {snap?.households_at_reserve ?? 0}
+                <span className="dim"> · mean store {(snap?.mean_store ?? 0).toFixed(0)}</span>
+              </dd>
+              <dt>Taught</dt>
+              <dd className="num">
+                {snap?.beliefs_taught ?? 0}
+                <span className="dim"> · told {snap?.beliefs_shared ?? 0}</span>
+              </dd>
             </dl>
             {snap?.population_maintained && (
               /* Honesty about the fixture: reproduction is M4, so this census

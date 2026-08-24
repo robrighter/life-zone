@@ -1,6 +1,10 @@
 import type { CreatureDetail, WorldConfig } from "../ipc";
 import { Lifespan } from "./Lifespan";
 
+/// The reproduction reserve, for scaling the store bar. Read from config where
+/// it is available; this is only the fallback for the bar's full mark.
+const RESERVE_HINT = 20;
+
 /**
  * The creature inspector (PRD §9.2).
  *
@@ -75,6 +79,93 @@ export function Inspector({ d, config }: { d: CreatureDetail; config: WorldConfi
           <Trait label="Sociability" v={d.traits.sociability} />
           <Trait label="Caution" v={d.traits.caution} />
         </div>
+      </div>
+
+      <div className="sec">
+        <div className="sec-head">
+          <span className="eyebrow">Household and kin</span>
+          {d.household_id != null && (
+            <span className="dim" style={{ fontSize: 11 }}>
+              #{d.household_id} · {d.household_members} member
+              {d.household_members === 1 ? "" : "s"}
+            </span>
+          )}
+        </div>
+        {d.household_id == null ? (
+          <p className="hint">No household. Nowhere to keep anything, and — until
+            there is — no children (§4.8).</p>
+        ) : (
+          <>
+            {/* Only grain keeps, so the store is really a grain store. Showing
+                both makes it obvious when a household is rich in food that is
+                about to rot and still cannot have a child. */}
+            <div className="needs" style={{ marginBottom: 8 }}>
+              <div className="need">
+                <span className="lbl">Store</span>
+                <div className="track">
+                  <div
+                    className="fill"
+                    style={{
+                      width: `${Math.min(100, (d.household_store / RESERVE_HINT) * 100)}%`,
+                      background: d.household_store >= RESERVE_HINT
+                        ? "var(--st-good)" : "var(--c2)",
+                    }}
+                  />
+                </div>
+                <span className="v">{d.household_store.toFixed(0)}</span>
+              </div>
+              <div className="need">
+                <span className="lbl">of which grain</span>
+                <div className="track">
+                  <div
+                    className="fill"
+                    style={{
+                      width: `${Math.min(100, (d.household_grain / RESERVE_HINT) * 100)}%`,
+                      background: "var(--res-wheat)",
+                    }}
+                  />
+                </div>
+                <span className="v">{d.household_grain.toFixed(0)}</span>
+              </div>
+            </div>
+          </>
+        )}
+
+        <dl className="kv">
+          <dt>Mate</dt>
+          <dd>
+            {d.mate ? (
+              <>{d.mate[1]} <span className="dim">· #{d.mate[0]}</span></>
+            ) : (
+              <span className="dim">unattached</span>
+            )}
+          </dd>
+          <dt>Parents</dt>
+          <dd>
+            {d.mother || d.father ? (
+              <>
+                {d.mother ? d.mother[1] : "—"}
+                {" · "}
+                {d.father ? d.father[1] : "—"}
+              </>
+            ) : (
+              <span className="dim">a founder</span>
+            )}
+          </dd>
+          <dt>Children</dt><dd className="num">{d.children_born}</dd>
+          {d.expecting_in != null && (
+            <>
+              <dt>Expecting</dt>
+              <dd className="num quick">in {Math.max(0, d.expecting_in)} ticks</dd>
+            </>
+          )}
+          {d.cannot_yet && (
+            <>
+              <dt>Not yet</dt>
+              <dd className="dim">{d.cannot_yet}</dd>
+            </>
+          )}
+        </dl>
       </div>
 
       <div className="sec">
@@ -159,6 +250,19 @@ export function Inspector({ d, config }: { d: CreatureDetail; config: WorldConfi
         <dl className="kv" style={{ marginTop: 10 }}>
           <dt>Decisions</dt>
           <dd className="num">{d.lifetime_deliberations} <span className="dim">lifetime</span></dd>
+          <dt>Taught</dt>
+          <dd className="num">{d.taught_count} <span className="dim">times</span></dd>
+          <dt>Told</dt>
+          <dd className="num">{d.shared_count} <span className="dim">times</span></dd>
+          {/* S7 at the level of one creature: how much of what it knows came
+              from somebody who is no longer alive to be asked. */}
+          <dt>Knows secondhand</dt>
+          <dd className="num">
+            {d.inherited_beliefs}
+            {d.from_the_dead > 0 && (
+              <span className="dim"> · {d.from_the_dead} from the dead</span>
+            )}
+          </dd>
         </dl>
       </div>
     </>

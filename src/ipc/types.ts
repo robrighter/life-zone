@@ -134,6 +134,23 @@ export interface CreatureDetail {
   belief_count: number;
   lifetime_deliberations: number;
   sheltered: boolean;
+
+  household_id: number | null;
+  household_store: number;
+  household_grain: number;
+  household_members: number;
+  /** [id, name] */
+  mate: [number, string] | null;
+  mother: [number, string] | null;
+  father: [number, string] | null;
+  children_born: number;
+  taught_count: number;
+  shared_count: number;
+  expecting_in: number | null;
+  /** Which of §4.8's requirements is missing, in plain language. */
+  cannot_yet: string | null;
+  inherited_beliefs: number;
+  from_the_dead: number;
 }
 
 export interface PhaseTimings {
@@ -164,6 +181,15 @@ export interface Snapshot {
   timings: PhaseTimings;
   ticks_per_second: number;
   population_maintained: boolean;
+
+  households: number;
+  households_at_reserve: number;
+  mean_store: number;
+  paired: number;
+  expecting: number;
+  deepest_generation: number;
+  beliefs_taught: number;
+  beliefs_shared: number;
 
   creatures: CreatureDot[];
   structures: StructureDot[];

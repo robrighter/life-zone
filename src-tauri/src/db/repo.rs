@@ -229,8 +229,12 @@ pub fn load_resource_nodes(conn: &Connection, world_id: i64) -> Result<Vec<Resou
 // ------------------------------------------------------------ M2: the sim
 
 use crate::sim::actions::AbortReason;
-use crate::sim::creature::{Creature, DeathCause, Inventory, LifeStage, Plan, Sex, Traits};
+use crate::sim::creature::{
+    Creature, DeathCause, Inventory, LifeStage, Plan, Pregnancy, Sex, Traits,
+};
 use crate::sim::economy::{Structure, StructureKind, Structures};
+use crate::sim::social::{Courtships, Edge, Household, Households, Offer, RelKind, Relationships};
+use crate::sim::tick::TransmissionRecord;
 use crate::sim::event::Event;
 use crate::sim::knowledge::{Belief, BeliefKind, Estimate};
 use crate::sim::tick::{DecisionRecord, PlanOutcome, TickReport};
@@ -381,10 +385,13 @@ pub fn upsert_creatures<'a>(
             plan_horizon, plan_ticks_remaining, plan_step_index,
             last_deliberation_tick, deliberation_pressure,
             lifetime_deliberations, lifetime_think_fatigue, habit_prior_json,
-            wear, exposed_ticks, in_shelter, trauma_cause, trauma_tick)
+            wear, exposed_ticks, in_shelter, trauma_cause, trauma_tick,
+            mate_id, paired_tick, pregnant_by, due_tick, last_birth_tick,
+            children_born, guardian_id, taught_count, shared_count)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14,
                  ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27,
-                 ?28, ?29, ?30, ?31, NULL, ?32, ?33, ?34, ?35, ?36)
+                 ?28, ?29, ?30, ?31, NULL, ?32, ?33, ?34, ?35, ?36,
+                 ?37, ?38, ?39, ?40, ?41, ?42, ?43, ?44, ?45)
          ON CONFLICT(id) DO UPDATE SET
             household_id = excluded.household_id,
             death_tick = excluded.death_tick,
@@ -409,7 +416,16 @@ pub fn upsert_creatures<'a>(
             exposed_ticks = excluded.exposed_ticks,
             in_shelter = excluded.in_shelter,
             trauma_cause = excluded.trauma_cause,
-            trauma_tick = excluded.trauma_tick",
+            trauma_tick = excluded.trauma_tick,
+            mate_id = excluded.mate_id,
+            paired_tick = excluded.paired_tick,
+            pregnant_by = excluded.pregnant_by,
+            due_tick = excluded.due_tick,
+            last_birth_tick = excluded.last_birth_tick,
+            children_born = excluded.children_born,
+            guardian_id = excluded.guardian_id,
+            taught_count = excluded.taught_count,
+            shared_count = excluded.shared_count",
     )?;
     for c in creatures {
         let plan_json = c.plan.as_ref().map(serde_json::to_string).transpose()?;
@@ -450,6 +466,15 @@ pub fn upsert_creatures<'a>(
             c.in_shelter,
             c.trauma.map(|(cause, _)| cause.as_str()),
             c.trauma.map(|(_, at)| at),
+            c.mate_id,
+            c.paired_tick,
+            c.pregnancy.map(|p| p.father_id),
+            c.pregnancy.map(|p| p.due_tick),
+            c.last_birth_tick,
+            c.children_born,
+            c.guardian_id,
+            c.taught_count,
+            c.shared_count,
         ])?;
     }
     Ok(())
@@ -539,6 +564,211 @@ pub fn upsert_structures(tx: &Transaction, world_id: i64, structures: &[Structur
     Ok(())
 }
 
+/// Household rows. Written before creatures every tick, because
+/// `creatures.household_id` is a foreign key into this table and a creature
+/// that founded a home this tick has nowhere to point until its household
+/// exists.
+pub fn upsert_households(
+    tx: &Transaction,
+    world_id: i64,
+    households: &[Household],
+) -> Result<()> {
+    let mut stmt = tx.prepare_cached(
+        "INSERT INTO households
+           (id, world_id, shelter_id, founded_tick, dissolved_tick, store_json, size_cap,
+            founder_a, founder_b)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+         ON CONFLICT(id) DO UPDATE SET
+            shelter_id = excluded.shelter_id,
+            dissolved_tick = excluded.dissolved_tick,
+            store_json = excluded.store_json,
+            size_cap = excluded.size_cap",
+    )?;
+    for h in households {
+        stmt.execute(rusqlite::params![
+            h.id,
+            world_id,
+            h.shelter_id,
+            h.founded_tick,
+            h.dissolved_tick,
+            serde_json::to_string(&h.store)?,
+            h.size_cap as i64,
+            h.founder_ids.0,
+            h.founder_ids.1,
+        ])?;
+    }
+    Ok(())
+}
+
+/// Directed affinity edges (§4.10).
+///
+/// Rewritten wholesale on the slow cadence rather than incrementally: the set
+/// churns constantly as creatures meet and die, and a diff would cost more to
+/// compute than the write it saves.
+pub fn save_relationships(
+    tx: &Transaction,
+    world_id: i64,
+    rels: &Relationships,
+) -> Result<()> {
+    tx.execute("DELETE FROM relationships WHERE world_id = ?1", [world_id])?;
+    let mut stmt = tx.prepare_cached(
+        "INSERT INTO relationships
+           (world_id, from_creature, to_creature, affinity, kind, updated_tick)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+    )?;
+    for ((from, to), e) in rels.iter() {
+        stmt.execute(rusqlite::params![
+            world_id,
+            from,
+            to,
+            e.affinity,
+            e.kind.map(|k| k.as_str()),
+            e.updated_tick,
+        ])?;
+    }
+    Ok(())
+}
+
+/// One row per act of transmission — who told whom, over which channel, how
+/// much. This is what the culture reports read: the transmission graph, the
+/// teaching rate by household, and whether information hubs emerge (§10).
+pub fn insert_transmissions(
+    tx: &Transaction,
+    world_id: i64,
+    rows: &[TransmissionRecord],
+) -> Result<()> {
+    if rows.is_empty() {
+        return Ok(());
+    }
+    let mut stmt = tx.prepare_cached(
+        "INSERT INTO transmissions
+           (world_id, tick, from_creature, to_creature, channel, belief_count, kinds_json)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+    )?;
+    for r in rows {
+        stmt.execute(rusqlite::params![
+            world_id,
+            r.tick,
+            r.from,
+            r.to,
+            r.channel.as_str(),
+            r.count as i64,
+            "[]",
+        ])?;
+    }
+    Ok(())
+}
+
+pub fn load_households(conn: &Connection, world_id: i64) -> Result<Households> {
+    let mut stmt = conn.prepare(
+        "SELECT id, shelter_id, founded_tick, dissolved_tick, store_json, size_cap,
+                founder_a, founder_b
+         FROM households WHERE world_id = ?1 ORDER BY id",
+    )?;
+    let rows = stmt.query_map([world_id], |r| {
+        Ok(Household {
+            id: r.get(0)?,
+            shelter_id: r.get(1)?,
+            founded_tick: r.get(2)?,
+            dissolved_tick: r.get(3)?,
+            store: serde_json::from_str(&r.get::<_, String>(4)?).unwrap_or_default(),
+            size_cap: r.get::<_, i64>(5)? as u32,
+            founder_ids: (r.get::<_, Option<i64>>(6)?.unwrap_or(0), r.get(7)?),
+            dirty: false,
+        })
+    })?;
+    let items: Vec<Household> = rows.collect::<Result<Vec<_>, _>>()?;
+    let next = items.iter().map(|h| h.id).max().unwrap_or(0) + 1;
+    let mut hs = Households::with_next_id(next);
+    hs.items = items;
+    Ok(hs)
+}
+
+/// Courtship offers awaiting an answer. Persisted because a creature's next
+/// decision depends on whether one is standing, so losing them makes a resumed
+/// run diverge.
+pub fn save_courtships(tx: &Transaction, world_id: i64, c: &Courtships) -> Result<()> {
+    tx.execute("DELETE FROM courtship_offers WHERE world_id = ?1", [world_id])?;
+    let mut stmt = tx.prepare_cached(
+        "INSERT INTO courtship_offers (world_id, from_creature, to_creature, offered_tick)
+         VALUES (?1, ?2, ?3, ?4)",
+    )?;
+    for o in &c.offers {
+        stmt.execute(rusqlite::params![world_id, o.from, o.to, o.tick])?;
+    }
+    Ok(())
+}
+
+pub fn load_courtships(conn: &Connection, world_id: i64) -> Result<Courtships> {
+    let mut stmt = conn.prepare(
+        "SELECT from_creature, to_creature, offered_tick
+         FROM courtship_offers WHERE world_id = ?1 ORDER BY from_creature, to_creature",
+    )?;
+    let rows = stmt.query_map([world_id], |r| {
+        Ok(Offer { from: r.get(0)?, to: r.get(1)?, tick: r.get(2)? })
+    })?;
+    let mut c = Courtships::new();
+    c.offers = rows.collect::<Result<Vec<_>, _>>()?;
+    Ok(c)
+}
+
+pub fn load_relationships(conn: &Connection, world_id: i64) -> Result<Relationships> {
+    let mut stmt = conn.prepare(
+        "SELECT from_creature, to_creature, affinity, kind, updated_tick
+         FROM relationships WHERE world_id = ?1 ORDER BY from_creature, to_creature",
+    )?;
+    let mut rels = Relationships::new();
+    let mut rows = stmt.query([world_id])?;
+    while let Some(row) = rows.next()? {
+        let kind = row.get::<_, Option<String>>(3)?.and_then(|k| match k.as_str() {
+            "KIN" => Some(RelKind::Kin),
+            "MATE" => Some(RelKind::Mate),
+            "HOUSEHOLD" => Some(RelKind::Household),
+            "ACQUAINTANCE" => Some(RelKind::Acquaintance),
+            _ => None,
+        });
+        rels.insert_raw(
+            row.get(0)?,
+            row.get(1)?,
+            Edge { affinity: row.get(2)?, kind, updated_tick: row.get(4)? },
+        );
+    }
+    Ok(rels)
+}
+
+/// Lineage depth and descendant counts, by a recursive CTE over
+/// `mother_id`/`father_id`.
+///
+/// Invariant 6: lineage is derived, never stored. This is that derivation — the
+/// only place the tree exists — and it is why there is no `lineage` table to
+/// keep in sync with reality.
+pub fn deepest_lineages(
+    conn: &Connection,
+    world_id: i64,
+    limit: i64,
+) -> Result<Vec<(i64, String, i32, i64)>> {
+    let mut stmt = conn.prepare(
+        "WITH RECURSIVE descent(founder, id, depth) AS (
+             SELECT id, id, 0 FROM creatures
+              WHERE world_id = ?1 AND generation = 1
+             UNION ALL
+             SELECT d.founder, c.id, d.depth + 1
+               FROM creatures c JOIN descent d
+                 ON c.mother_id = d.id OR c.father_id = d.id
+              WHERE c.world_id = ?1 AND d.depth < 24
+         )
+         SELECT d.founder, f.name, MAX(d.depth) AS depth, COUNT(*) - 1 AS descendants
+           FROM descent d JOIN creatures f ON f.id = d.founder
+          GROUP BY d.founder
+          ORDER BY depth DESC, descendants DESC
+          LIMIT ?2",
+    )?;
+    let rows = stmt.query_map(rusqlite::params![world_id, limit], |r| {
+        Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
+    })?;
+    Ok(rows.collect::<Result<Vec<_>, _>>()?)
+}
+
 /// Structures that no longer exist in RAM (a fire burnt to cold ash) are
 /// removed, so a resume does not resurrect them.
 pub fn prune_structures(tx: &Transaction, world_id: i64, alive: &[Structure]) -> Result<()> {
@@ -584,7 +814,9 @@ pub fn load_living_creatures(conn: &Connection, world_id: i64) -> Result<Vec<Cre
                 traits_json, inventory_json, current_plan_json,
                 last_deliberation_tick, deliberation_pressure,
                 lifetime_deliberations, lifetime_think_fatigue,
-                wear, exposed_ticks, in_shelter, trauma_cause, trauma_tick
+                wear, exposed_ticks, in_shelter, trauma_cause, trauma_tick,
+                mate_id, paired_tick, pregnant_by, due_tick, last_birth_tick,
+                children_born, guardian_id, taught_count, shared_count
          FROM creatures WHERE world_id = ?1 AND death_tick IS NULL ORDER BY id",
     )?;
     let rows = stmt.query_map([world_id], |r| {
@@ -631,6 +863,17 @@ pub fn load_living_creatures(conn: &Connection, world_id: i64) -> Result<Vec<Cre
                 (Some(cause), Some(at)) => death_cause_from_str(&cause).map(|c| (c, at)),
                 _ => None,
             },
+            mate_id: r.get(31)?,
+            paired_tick: r.get(32)?,
+            pregnancy: match (r.get::<_, Option<i64>>(33)?, r.get::<_, Option<i64>>(34)?) {
+                (Some(father_id), Some(due_tick)) => Some(Pregnancy { father_id, due_tick }),
+                _ => None,
+            },
+            last_birth_tick: r.get(35)?,
+            children_born: r.get(36)?,
+            guardian_id: r.get(37)?,
+            taught_count: r.get(38)?,
+            shared_count: r.get(39)?,
             dirty: false,
         })
     })?;

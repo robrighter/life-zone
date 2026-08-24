@@ -11,6 +11,7 @@ use std::path::Path;
 const MIGRATIONS: &[(i32, &str, &str)] = &[
     (1, "001_initial", include_str!("migrations/001_initial.sql")),
     (2, "002_sim_state", include_str!("migrations/002_sim_state.sql")),
+    (3, "003_society", include_str!("migrations/003_society.sql")),
 ];
 
 /// Open the database, apply pragmas, and bring the schema up to date.
@@ -78,7 +79,7 @@ mod tests {
     fn migrations_apply_from_empty() {
         let conn = mem();
         let v: i32 = conn.query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap();
-        assert_eq!(v, 2);
+        assert_eq!(v, 3);
     }
 
     #[test]
@@ -87,7 +88,7 @@ mod tests {
         // Running again must be a no-op rather than an error.
         migrate(&conn).unwrap();
         let v: i32 = conn.query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap();
-        assert_eq!(v, 2);
+        assert_eq!(v, 3);
     }
 
     #[test]
@@ -101,7 +102,7 @@ mod tests {
         migrate(&conn).unwrap();
 
         let v: i32 = conn.query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap();
-        assert_eq!(v, 2);
+        assert_eq!(v, 3);
         let n: i32 = conn
             .query_row("SELECT COUNT(*) FROM pragma_table_info('creatures') WHERE name = 'wear'",
                        [], |r| r.get(0))
