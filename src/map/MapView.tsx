@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
-  FLAG_AT_FIRE, FLAG_COLD, FLAG_HUNGRY, FLAG_SHELTERED, FLAG_THIRSTY,
+  FLAG_AT_FIRE, FLAG_COLD, FLAG_HUNGRY, FLAG_MODEL_PLAN, FLAG_SHELTERED,
+  FLAG_THINKING, FLAG_THIRSTY,
   type Palette, type ResourceNode, type Snapshot, type WorldMeta,
 } from "../ipc";
 import { ChunkCache } from "./chunkCache";
@@ -17,6 +18,8 @@ export interface Overlays {
   plans: boolean;
   /** Render the map as *known* rather than as it is (§9.1). */
   knowledge: boolean;
+  /** Who the model is spending its attention on (§9.1, §5.3). */
+  deliberation: boolean;
 }
 
 export interface BenchResult {
@@ -321,6 +324,26 @@ export function MapView({
           ctx.arc(px, py, size, 0, 6.284);
           ctx.stroke();
           ctx.fill();
+        }
+
+        // The deliberation heatmap: an invisible budget made visible. A ring
+        // while a call is in flight, a filled halo while the creature is
+        // running what the model told it to do.
+        if (o.deliberation) {
+          if (cr.flags & FLAG_MODEL_PLAN) {
+            ctx.fillStyle = "rgba(122,162,247,.30)";
+            ctx.beginPath();
+            ctx.arc(px, py, size * 2.6, 0, 6.284);
+            ctx.fill();
+          }
+          if (cr.flags & FLAG_THINKING) {
+            ctx.strokeStyle = "rgba(122,162,247,.95)";
+            ctx.lineWidth = Math.max(1.2, c.scale * 0.35);
+            ctx.beginPath();
+            ctx.arc(px, py, size * 3.2, 0, 6.284);
+            ctx.stroke();
+            ctx.lineWidth = Math.max(1.1, c.scale * 0.5);
+          }
         }
 
         // A creature in trouble gets a small tell, not a second colour.

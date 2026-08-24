@@ -28,6 +28,16 @@ fn main() {
 
     match cmd {
         "world" => world_report(seed),
+        "llm" => {
+            let ticks: i64 = args.get(3).and_then(|s| s.parse().ok()).unwrap_or(60);
+            let calls: usize = args.get(4).and_then(|s| s.parse().ok()).unwrap_or(6);
+            llm_report(seed, ticks, calls);
+        }
+        "s6" => {
+            let ticks: i64 = args.get(3).and_then(|s| s.parse().ok()).unwrap_or(150);
+            let calls: usize = args.get(4).and_then(|s| s.parse().ok()).unwrap_or(30);
+            s6_report(seed, ticks, calls);
+        }
         "run" => {
             let creatures: u32 = args.get(3).and_then(|s| s.parse().ok()).unwrap_or(500);
             let ticks: i64 = args.get(4).and_then(|s| s.parse().ok()).unwrap_or(2000);
@@ -39,6 +49,252 @@ fn main() {
 
 fn pct(n: usize, total: usize) -> f64 {
     if total == 0 { 0.0 } else { n as f64 * 100.0 / total as f64 }
+}
+
+// ---------------------------------------------------------------- S6 report
+
+/// Does the model choose differently from the deterministic policy?
+///
+/// S6 is the criterion that matters most: "replacing LLM deliberation with the
+/// deterministic fallback produces visibly different, worse outcomes." §10 says
+/// the sharpest early warning is the action distribution of the two tiers — "if
+/// these two distributions converge, S6 is failing."
+///
+/// Both are asked about the same creature, in the same state, from the same
+/// pre-validated menu. Any difference is therefore the decision and not the
+/// situation.
+fn s6_report(seed: u64, ticks: i64, calls: usize) {
+    use life_zone_lib::ai::ollama::{Client, Depth};
+    use life_zone_lib::ai::schema;
+
+    let mut cfg = WorldConfig::default();
+    cfg.map.width = 256;
+    cfg.map.height = 256;
+    cfg.bench.maintain_population = Some(80);
+
+    let world = worldgen::generate(seed, &cfg).world;
+    let mut sim = Sim::new(1, world, cfg.clone(), seed);
+    sim.spawn_population(80);
+    for _ in 0..ticks {
+        sim.step();
+    }
+
+    println!("== S6: the model against Tier 1, same creature, same menu ==");
+    println!("model {}, world warmed {ticks} ticks, {} alive\n",
+             cfg.llm.model, sim.alive());
+
+    let client = Client::new(cfg.llm.clone());
+    let sc = schema::response_schema(cfg.deliberation.model_estimates_horizon);
+
+    let mut tier1: BTreeMap<String, usize> = BTreeMap::new();
+    let mut model: BTreeMap<String, usize> = BTreeMap::new();
+    let mut tier1_intent: BTreeMap<String, usize> = BTreeMap::new();
+    let mut model_intent: BTreeMap<String, usize> = BTreeMap::new();
+    let mut agreed = 0usize;
+    let mut compared = 0usize;
+    let mut horizons: (u32, u32, usize) = (0, 0, 0);
+    let mut steps_per_plan = (0usize, 0usize);
+    let mut rejected = 0usize;
+    let mut examples: Vec<String> = Vec::new();
+
+    let ids: Vec<i64> = sim.creatures.iter().map(|c| c.id).collect();
+    let started = Instant::now();
+
+    for id in ids.into_iter().take(calls) {
+        let Some((prompt, menu)) = sim.deliberation_for(id) else { continue };
+        let Some((t1_goal, t1_intent)) = sim.tier1_choice(id) else { continue };
+
+        let Ok(r) = client.chat(&prompt, &sc, Depth::Standard) else {
+            rejected += 1;
+            continue;
+        };
+        let Ok(v) = schema::validate(&r.raw, &menu, &cfg) else {
+            rejected += 1;
+            continue;
+        };
+
+        let m_goal = v.steps[0].goal.as_str().to_string();
+        let m_intent = format!("{:?}", v.addresses);
+        let t1_intent_s = format!("{t1_intent:?}");
+
+        compared += 1;
+        if m_goal == t1_goal {
+            agreed += 1;
+        } else if examples.len() < 6 {
+            let c = sim.creature(id).unwrap();
+            examples.push(format!(
+                "  #{} ({}, {}): tier 1 said {t1_goal}; the model said {m_goal} — \"{}\"",
+                id, c.name, c.felt_state(&cfg.needs), v.rationale,
+            ));
+        }
+        *tier1.entry(t1_goal).or_default() += 1;
+        *model.entry(m_goal).or_default() += 1;
+        *tier1_intent.entry(t1_intent_s).or_default() += 1;
+        *model_intent.entry(m_intent).or_default() += 1;
+        horizons.1 += v.horizon;
+        horizons.2 += 1;
+        steps_per_plan.0 += v.steps.len();
+        steps_per_plan.1 += 1;
+    }
+
+    if compared == 0 {
+        println!("nothing was comparable — is ollama running?");
+        return;
+    }
+
+    println!("compared {compared} decisions in {:.0}s ({rejected} unusable)\n",
+             started.elapsed().as_secs_f64());
+    println!("-- agreement --");
+    println!("  the two tiers chose the same first action {agreed}/{compared} times \
+              ({:.0}%)", pct(agreed, compared));
+    println!("  they differed {:.0}% of the time", pct(compared - agreed, compared));
+    println!("  §10: if these distributions converge, S6 is failing.\n");
+
+    let show = |name: &str, a: &BTreeMap<String, usize>, b: &BTreeMap<String, usize>| {
+        println!("-- {name} --");
+        let mut keys: Vec<&String> = a.keys().chain(b.keys()).collect();
+        keys.sort();
+        keys.dedup();
+        println!("  {:<22} {:>10} {:>10}", "", "tier 1", "model");
+        for k in keys {
+            let (x, y) = (a.get(k).copied().unwrap_or(0), b.get(k).copied().unwrap_or(0));
+            println!("  {k:<22} {:>9.0}% {:>9.0}%", pct(x, compared), pct(y, compared));
+        }
+        println!();
+    };
+    show("first action chosen", &tier1, &model);
+    show("what the plan was for", &tier1_intent, &model_intent);
+
+    println!("-- the model's plans --");
+    println!("  mean horizon {:.1} ticks", horizons.1 as f64 / horizons.2.max(1) as f64);
+    println!("  mean steps per plan {:.2} (Tier 1 rarely exceeds 2)",
+             steps_per_plan.0 as f64 / steps_per_plan.1.max(1) as f64);
+
+    if !examples.is_empty() {
+        println!("\n-- where they disagreed --");
+        for e in &examples {
+            println!("{e}");
+        }
+    }
+}
+
+// -------------------------------------------------------------- llm report
+
+/// Measure what a deliberation actually costs on this machine.
+///
+/// Everything about the budget in §5.3 and the speed modes in §5.6 depends on
+/// this number, and the PRD's figures assume a GPU. Prompts are built by the
+/// simulation itself rather than by hand, so what is timed is what is sent.
+fn llm_report(seed: u64, ticks: i64, calls: usize) {
+    use life_zone_lib::ai::ollama::{Client, Depth, Prompt};
+    use life_zone_lib::ai::schema;
+
+    let mut cfg = WorldConfig::default();
+    cfg.map.width = 256;
+    cfg.map.height = 256;
+    let world = worldgen::generate(seed, &cfg).world;
+    let mut sim = Sim::new(1, world, cfg.clone(), seed);
+    sim.spawn_population(80);
+    for _ in 0..ticks {
+        sim.step();
+    }
+
+    println!("== LLM cost, model {} ==", cfg.llm.model);
+    println!("warmed the world for {ticks} ticks, {} creatures alive\n", sim.alive());
+
+    let ids: Vec<i64> = sim.creatures.iter().map(|c| c.id).take(calls).collect();
+    let mut prompts: Vec<(i64, Prompt, schema::ActionMenu)> = Vec::new();
+    for id in ids {
+        if let Some((p, m)) = sim.deliberation_for(id) {
+            prompts.push((id, p, m));
+        }
+    }
+    if prompts.is_empty() {
+        println!("no creature had a legal menu — nothing to measure");
+        return;
+    }
+
+    let example = &prompts[0].1;
+    println!("-- prompt shape --");
+    println!("  system {} chars (identical every call — the cached prefix)",
+             example.system.len());
+    println!("  user   {} chars (this creature, this tick)", example.user.len());
+    println!("  menu   {} options", prompts[0].2.options.len());
+    println!("\n----- example prompt -----\n{}\n{}\n--------------------------\n",
+             example.system, example.user);
+
+    let sc = schema::response_schema(cfg.deliberation.model_estimates_horizon);
+    let client = Client::new(cfg.llm.clone());
+
+    for depth in [Depth::Shallow, Depth::Standard] {
+        let mut lat: Vec<u64> = Vec::new();
+        let mut ok = 0usize;
+        let mut rejected: BTreeMap<&str, usize> = BTreeMap::new();
+        let mut ptok = 0u32;
+        let mut cached = 0u32;
+        let mut rtok = 0u32;
+        let started = Instant::now();
+
+        for (id, p, menu) in &prompts {
+            match client.chat(p, &sc, depth) {
+                Ok(r) => {
+                    lat.push(r.latency_ms);
+                    ptok += r.prompt_tokens;
+                    cached += r.cached_tokens;
+                    rtok += r.response_tokens;
+                    match schema::validate(&r.raw, menu, &cfg) {
+                        Ok(v) => {
+                            ok += 1;
+                            if ok == 1 {
+                                println!("-- first accepted plan (creature #{id}) --");
+                                for st in &v.steps {
+                                    println!("   {} {}", st.goal.as_str(),
+                                             st.describe(&sim.world));
+                                }
+                                println!("   horizon {} — \"{}\"\n", v.horizon, v.rationale);
+                            }
+                        }
+                        Err(e) => {
+                            *rejected.entry(e.as_str()).or_default() += 1;
+                            if rejected.len() == 1 {
+                                println!("-- first rejected response ({}) --\n{}\n",
+                                         e.as_str(), r.raw.chars().take(300)
+                                             .collect::<String>());
+                            }
+                        }
+                    }
+                }
+                Err(e) => {
+                    *rejected.entry(e.as_str()).or_default() += 1;
+                }
+            }
+        }
+
+        if lat.is_empty() {
+            println!("-- {} -- no calls completed (is ollama running?)", depth.as_str());
+            continue;
+        }
+        lat.sort_unstable();
+        let n = lat.len();
+        let mean = lat.iter().sum::<u64>() as f64 / n as f64;
+        println!("-- {} --", depth.as_str());
+        println!("  {n} calls in {:.1}s: mean {:.0}ms, p50 {}ms, max {}ms",
+                 started.elapsed().as_secs_f64(), mean, lat[n / 2], lat[n - 1]);
+        println!("  accepted {ok}/{n}  ({:.0}% usable first time)", pct(ok, n));
+        println!("  prompt tokens {ptok} of which {cached} came from cache ({:.0}%)",
+                 pct(cached as usize, ptok as usize));
+        println!("  response tokens {rtok}");
+        for (why, k) in &rejected {
+            println!("    rejected: {why} x{k}");
+        }
+        // What the budget can actually be, given the mode targets in §5.6.
+        println!("  => at {:.0}ms a call, one tick of Observe affords {:.1} calls \
+                  in {:.0}s",
+                 mean,
+                 cfg.deliberation.observe_target_tick_ms as f64 / mean,
+                 cfg.deliberation.observe_target_tick_ms as f64 / 1000.0);
+        println!();
+    }
 }
 
 // ------------------------------------------------------------ world report

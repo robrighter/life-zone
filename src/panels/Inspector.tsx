@@ -171,7 +171,11 @@ export function Inspector({ d, config }: { d: CreatureDetail; config: WorldConfi
       <div className="sec">
         <div className="sec-head">
           <span className="eyebrow">Committed plan</span>
-          <span className="badge">tier {d.plan_tier} · {d.plan_addresses.toLowerCase()}</span>
+          {/* Whose plan this is matters more than any number on the screen:
+              it is the difference S6 is measured on. */}
+          <span className="badge">
+            {d.plan_tier === 2 ? "the model" : "tier 1"} · {d.plan_addresses.toLowerCase()}
+          </span>
         </div>
         {d.steps.length === 0 ? (
           <p className="hint">Deciding.</p>

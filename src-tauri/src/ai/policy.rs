@@ -35,7 +35,7 @@ use crate::sim::social::{Bystander, CreatureIndex, Courtships, Households, Relat
 use crate::sim::perception::WorldCache;
 use crate::sim::terrain::Terrain;
 use crate::sim::world::{NodeKind, World};
-use rand::Rng;
+use rand::{Rng, SeedableRng};
 use rand_chacha::ChaCha8Rng;
 
 pub struct PolicyCtx<'a> {
@@ -50,10 +50,30 @@ pub struct PolicyCtx<'a> {
     pub cfg: &'a WorldConfig,
     pub tick: i64,
     pub night: bool,
+    /// The last few significant things that happened to *this* creature —
+    /// §5.7 point 6, which is distinct from beliefs: those are about the world,
+    /// these are about the self. Empty for Tier 1, which has no use for them.
+    pub recent_events: &'a [String],
 }
 
 impl PolicyCtx<'_> {
     /// Where this creature's household keeps its store, if it has one.
+    pub fn hearth_of(&self, c: &Creature) -> Option<(i64, u32, u32)> {
+        self.hearth(c)
+    }
+
+    /// Where this creature would head if it went looking. Exposed so the
+    /// action menu can offer the same destination Tier 1 would pick, rather
+    /// than a second, differently-chosen one.
+    pub fn explore_target_for(&self, c: &Creature) -> (u32, u32) {
+        // A fixed stream: the menu must not consume the simulation's RNG, or
+        // merely *offering* an option would change the world.
+        let mut rng = ChaCha8Rng::seed_from_u64(
+            (c.id as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15) ^ self.tick as u64,
+        );
+        explore_target(c, self, &mut rng)
+    }
+
     fn hearth(&self, c: &Creature) -> Option<(i64, u32, u32)> {
         let h = self.households.get(c.household_id?)?;
         let s = self.structures.get(h.shelter_id?)?;
@@ -1491,6 +1511,7 @@ mod tests {
                 cfg: &self.cfg,
                 tick,
                 night,
+                recent_events: &[],
             }
         }
 

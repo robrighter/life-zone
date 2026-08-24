@@ -195,13 +195,21 @@ pub struct LlmConfig {
     pub timeout_ms: u64,
     pub max_retries: u32,
     /// Concurrency is kept for hardware that benefits from it. On a CPU-only
-    /// host it does not: measured throughput is flat from N=1 to N=6.
+    /// host it does not, and it actively hurts: Ollama serialises requests to
+    /// one model, so four "concurrent" calls simply queue server-side and each
+    /// waits for the others. Measured here — four workers left ten of eleven
+    /// calls outstanding for three minutes, while one worker answers in ~2.3s
+    /// and the queue stays honest about how much thinking is really available.
     pub max_concurrent: u32,
     /// Put static rules/legend/action-menu first and creature state last, so
     /// Ollama's prefix cache covers the shared prefix. Measured 3.82s -> 0.58s
     /// of prompt-eval on qwen3:1.7b.
     pub static_prefix_ordering: bool,
     pub retain_prompt_text_ticks: Option<u32>,
+    /// Context window. Small on purpose: the prompt is a creature's felt state
+    /// and a short menu, not a transcript, and a large window costs real time
+    /// to evaluate on CPU.
+    pub num_ctx: u32,
 }
 impl Default for LlmConfig {
     fn default() -> Self {
@@ -211,9 +219,10 @@ impl Default for LlmConfig {
             temperature: 0.7,
             timeout_ms: 30_000,
             max_retries: 1,
-            max_concurrent: 4,
+            max_concurrent: 1,
             static_prefix_ordering: true,
             retain_prompt_text_ticks: None,
+            num_ctx: 4096,
         }
     }
 }
@@ -250,6 +259,21 @@ pub struct DeliberationConfig {
     pub horizon_cap_construction: u32,
     pub horizon_cap_social: u32,
     pub horizon_cap_crisis: u32,
+
+    /// §13.9's open question, as a switch rather than an opinion.
+    ///
+    /// True: the model names the horizon in ticks. False: it names a coarse
+    /// commitment level and the engine derives the number from the plan's own
+    /// step costs. Asking a small model to predict how long something will take
+    /// is a genuinely hard judgment; asking how sure it is about its own
+    /// information is not. Both are implemented so the comparison is a
+    /// measurement.
+    pub model_estimates_horizon: bool,
+    /// Deliberations dispatched without blocking the tick. See `ai::ollama`.
+    pub async_dispatch: bool,
+    /// How long a dispatched call may remain outstanding before the creature
+    /// stops waiting for it.
+    pub dispatch_ttl_ticks: u32,
 }
 impl Default for DeliberationConfig {
     fn default() -> Self {
@@ -277,6 +301,9 @@ impl Default for DeliberationConfig {
             horizon_cap_construction: 16,
             horizon_cap_social: 4,
             horizon_cap_crisis: 1,
+            model_estimates_horizon: false,
+            async_dispatch: true,
+            dispatch_ttl_ticks: 40,
         }
     }
 }

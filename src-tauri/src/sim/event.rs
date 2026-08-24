@@ -62,6 +62,8 @@ pub enum EventKind {
     Shared,
     Taught,
     Overheard,
+    /// The model produced a plan this creature adopted.
+    Deliberated,
 }
 
 impl EventKind {
@@ -114,6 +116,7 @@ impl EventKind {
             EventKind::Shared => "SHARED",
             EventKind::Taught => "TAUGHT",
             EventKind::Overheard => "OVERHEARD",
+            EventKind::Deliberated => "DELIBERATED",
         }
     }
 }

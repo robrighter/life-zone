@@ -32,6 +32,7 @@ export default function App() {
   const [bench, setBench] = useState<BenchResult | null>(null);
   const [overlays, setOverlays] = useState<Overlays>({
     nodes: true, creatures: true, structures: true, plans: true, knowledge: false,
+    deliberation: true,
   });
 
   const nodesVersion = useRef(-1);
@@ -253,6 +254,44 @@ export default function App() {
           </div>
 
           <div className="sec">
+            <div className="sec-head">
+              <span className="eyebrow">Deliberation</span>
+              <span className="dim" style={{ fontSize: 11 }}>
+                {snap?.llm_enabled ? snap.llm_model : "tier 1 only"}
+              </span>
+            </div>
+            {!snap?.llm_enabled ? (
+              <p className="hint">
+                No model. Tier 1 runs the whole simulation on its own — which is
+                the S6 control, not a degraded mode.
+              </p>
+            ) : (
+              <dl className="kv">
+                <dt>Calls</dt>
+                <dd className="num">
+                  {snap.llm_dispatched}
+                  <span className="dim"> · {snap.llm_in_flight} in flight</span>
+                </dd>
+                <dt>Accepted</dt><dd className="num">{snap.llm_accepted}</dd>
+                {/* Invariant 8: this is a production metric. A rising fallback
+                    rate is the model quietly ceasing to matter, which is the
+                    S6 failure. */}
+                <dt>Fallback</dt>
+                <dd className={snap.fallback_rate > 0.4 ? "val err" : "num"}>
+                  {(snap.fallback_rate * 100).toFixed(0)}%
+                </dd>
+                <dt>Latency</dt>
+                <dd className="num">{(snap.mean_latency_ms / 1000).toFixed(1)}s</dd>
+                <dt>On model plans</dt>
+                <dd className="num quick">
+                  {(snap.on_model_plans * 100).toFixed(0)}%
+                  <span className="dim"> of the living</span>
+                </dd>
+              </dl>
+            )}
+          </div>
+
+          <div className="sec">
             <div className="sec-head"><span className="eyebrow">Overlays</span></div>
             {([
               ["creatures", "Creatures"],
@@ -260,6 +299,7 @@ export default function App() {
               ["structures", "Shelters and fires"],
               ["plans", "Committed plan path"],
               ["knowledge", "What is known"],
+              ["deliberation", "Who is thinking"],
             ] as const).map(([k, label]) => (
               <label className="toggle" key={k}>
                 <input

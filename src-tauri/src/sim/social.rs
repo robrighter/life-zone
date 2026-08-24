@@ -496,6 +496,15 @@ impl CreatureIndex {
         self.people.len()
     }
 
+    /// How many creatures belong to a household. Cheap because the index
+    /// already holds everybody's membership.
+    pub fn len_with_household(&self, household: Option<i64>) -> usize {
+        match household {
+            None => 0,
+            Some(h) => self.people.iter().filter(|p| p.household_id == Some(h)).count(),
+        }
+    }
+
     pub fn is_empty(&self) -> bool {
         self.people.is_empty()
     }

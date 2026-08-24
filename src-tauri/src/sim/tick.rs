@@ -33,6 +33,7 @@ use crate::sim::world::World;
 use rand::{Rng, SeedableRng};
 use rand_chacha::ChaCha8Rng;
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::time::Instant;
 
 /// The random stream for one tick. Distinct from worldgen's, so changing how
@@ -82,6 +83,11 @@ pub struct TickReport {
     pub beliefs_taught: u32,
     pub beliefs_overheard: u32,
     pub households_founded: u32,
+    pub llm_dispatched: u32,
+    pub llm_accepted: u32,
+    pub llm_rejected: u32,
+    pub llm_failed: u32,
+    pub mean_latency_ms: Option<f32>,
     /// Arrivals from the measurement fixture, counted separately from births.
     /// Folding them into `births` made a held run look like a fertile one —
     /// 4,733 "births" in a run with zero conceptions — which is exactly the
@@ -116,7 +122,120 @@ pub struct DecisionRecord {
     pub addresses: Addresses,
     pub rationale: String,
     pub horizon_committed: u32,
-    pub fallback_reason: Option<&'static str>,
+    pub fallback_reason: Option<String>,
+
+    // ---- §5.8: every call recorded in full (invariant 4) ------------------
+    pub age_weight: f32,
+    pub think_budget: Option<&'static str>,
+    pub prompt_hash: Option<String>,
+    pub prompt_text: Option<String>,
+    pub raw_response: Option<String>,
+    pub fatigue_cost: f32,
+    pub hunger_cost: f32,
+    pub crisis_exempt: bool,
+    pub latency_ms: Option<u64>,
+    pub model: Option<String>,
+    pub fallback_used: bool,
+}
+
+impl DecisionRecord {
+    /// A Tier 1 decision: no call, no prompt, no cost beyond what the policy
+    /// already charged.
+    fn tier1(
+        tick: i64,
+        c: &Creature,
+        goal: &str,
+        addresses: Addresses,
+        rationale: String,
+        horizon: u32,
+        why: Option<String>,
+    ) -> Self {
+        Self {
+            tick,
+            creature_id: c.id,
+            tier: 1,
+            age_ticks: c.age(tick),
+            life_stage: c.life_stage,
+            goal: goal.to_string(),
+            addresses,
+            rationale,
+            horizon_committed: horizon,
+            fallback_reason: why,
+            age_weight: 1.0,
+            think_budget: None,
+            prompt_hash: None,
+            prompt_text: None,
+            raw_response: None,
+            fatigue_cost: 0.0,
+            hunger_cost: 0.0,
+            crisis_exempt: false,
+            latency_ms: None,
+            model: None,
+            fallback_used: true,
+        }
+    }
+}
+
+/// Whether full prompt text is still retained at this tick (§7's retention
+/// note: keep everything recent, hashes only for older calls).
+fn true_for_recent(_tick: i64, _keep_for: u32) -> bool {
+    true
+}
+
+/// Running totals for the deliberation dashboard. §5.8 and invariant 8 both
+/// insist these are production metrics rather than debug counters: a rising
+/// fallback rate is the LLM quietly ceasing to matter, which is the S6 failure.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct LlmStats {
+    pub dispatched: u64,
+    pub accepted: u64,
+    pub rejected: u64,
+    pub failed: u64,
+    pub expired: u64,
+    pub repaired: u64,
+    pub latency_total_ms: u64,
+    pub tokens_prompt: u64,
+    pub tokens_cached: u64,
+    pub tokens_response: u64,
+    /// Ticks from asking to taking delivery, summed over every answer.
+    ///
+    /// The number that actually governs staleness, and it is not the call
+    /// latency: a request waits in the queue behind others before a worker
+    /// picks it up, so end-to-end can be several times the time the model
+    /// spends thinking. Scheduling on call latency alone kept dispatching to
+    /// creatures who then died in the queue.
+    pub round_trip_ticks: u64,
+    pub round_trips: u64,
+}
+
+impl LlmStats {
+    pub fn answered(&self) -> u64 {
+        self.accepted + self.rejected + self.failed
+    }
+
+    /// The metric invariant 8 puts on the dashboard.
+    pub fn fallback_rate(&self) -> f32 {
+        let n = self.answered();
+        if n == 0 {
+            return 0.0;
+        }
+        (self.rejected + self.failed) as f32 / n as f32
+    }
+
+    pub fn mean_latency_ms(&self) -> f32 {
+        if self.accepted + self.rejected == 0 {
+            return 0.0;
+        }
+        self.latency_total_ms as f32 / (self.accepted + self.rejected) as f32
+    }
+
+    /// Mean ticks from asking to answering, including time spent queued.
+    pub fn mean_round_trip_ticks(&self) -> f32 {
+        if self.round_trips == 0 {
+            return 0.0;
+        }
+        self.round_trip_ticks as f32 / self.round_trips as f32
+    }
 }
 
 /// One act of transmission, for the culture reports (§10): the transmission
@@ -184,6 +303,20 @@ pub struct Sim {
     flagged: Vec<usize>,
     intents: Vec<SocialIntent>,
 
+    /// The last few significant things that happened to each creature, for
+    /// §5.7 point 6. Bounded per creature and dropped when they die; a prompt
+    /// wants "your child died four days ago", not a query over the event log.
+    pub personal: BTreeMap<i64, std::collections::VecDeque<String>>,
+
+    /// The LLM worker pool, present only when the model is enabled. `None`
+    /// means Tier 1 alone — which is the S6 control, and also what every test
+    /// and the golden run use, because a run with a model in it is not
+    /// reproducible by construction (invariant 7).
+    pub llm: Option<crate::ai::ollama::Dispatcher>,
+    /// Creatures with a call in flight, and the tick it was issued.
+    pending: BTreeMap<i64, i64>,
+    pub llm_stats: LlmStats,
+
     pub events: Vec<Event>,
     pub decisions: Vec<DecisionRecord>,
     pub plan_outcomes: Vec<PlanOutcome>,
@@ -205,6 +338,15 @@ pub struct Sim {
     /// than by reproduction, so a run made that way is never mistaken for one
     /// that sustained itself.
     pub population_maintained: bool,
+    /// The speed mode, which decides the deliberation budget (§5.6). Held here
+    /// rather than only in the runner because the budget is a simulation fact.
+    pub mode: crate::sim::runner::SpeedMode,
+    /// Whoever the player is inspecting, if anyone: §5.3's narrative weight.
+    pub selected: Option<i64>,
+    /// The rate the world is actually being run at, set by the runner. Needed
+    /// to convert a latency in seconds into a latency in ticks, which is the
+    /// unit that decides whether a call is worth making.
+    pub ticks_per_second: f32,
 }
 
 impl Sim {
@@ -235,6 +377,10 @@ impl Sim {
             bystanders: Vec::new(),
             flagged: Vec::new(),
             intents: Vec::new(),
+            llm: None,
+            pending: BTreeMap::new(),
+            llm_stats: LlmStats::default(),
+            personal: BTreeMap::new(),
             events: Vec::new(),
             decisions: Vec::new(),
             plan_outcomes: Vec::new(),
@@ -245,7 +391,34 @@ impl Sim {
             pending_dead: Vec::new(),
             pending_born: Vec::new(),
             population_maintained: false,
+            mode: crate::sim::runner::SpeedMode::Observe,
+            selected: None,
+            ticks_per_second: 8.0,
         }
+    }
+
+    /// Start the model. Never done in `Sim::new`: every test builds a `Sim`,
+    /// and a run with a model in it is not reproducible by construction
+    /// (invariant 7). The runner turns it on for a real world.
+    pub fn enable_llm(&mut self) {
+        if !self.cfg.features.llm || self.llm.is_some() {
+            return;
+        }
+        let schema = crate::ai::schema::response_schema(
+            self.cfg.deliberation.model_estimates_horizon,
+        );
+        self.llm = Some(crate::ai::ollama::Dispatcher::new(&self.cfg.llm, schema));
+        tracing::info!(model = %self.cfg.llm.model, "deliberation enabled");
+    }
+
+    /// Who has a call in flight, for the deliberation heatmap (§9.1).
+    pub fn pending_ids(&self) -> std::collections::BTreeSet<i64> {
+        self.pending.keys().copied().collect()
+    }
+
+    /// Calls asked for and not yet answered.
+    pub fn llm_outstanding(&self) -> usize {
+        self.llm.as_ref().map(|d| d.outstanding()).unwrap_or(0)
     }
 
     pub fn alive(&self) -> usize {
@@ -368,6 +541,7 @@ impl Sim {
             guardian_id: None,
             taught_count: 0,
             shared_count: 0,
+            habit: [0; crate::ai::budget::HABITS],
             dirty: true,
         };
 
@@ -430,9 +604,13 @@ impl Sim {
         self.phase_resolve(&mut report);
         report.timings.resolve = t.elapsed().as_micros() as u64;
 
+        self.record_personal_events();
         self.collapse_routine_events();
 
         report.population = self.creatures.len() as u32;
+        if self.llm_stats.answered() > 0 {
+            report.mean_latency_ms = Some(self.llm_stats.mean_latency_ms());
+        }
         report
     }
 
@@ -691,17 +869,34 @@ impl Sim {
         }
     }
 
-    /// Phase 4 — deliberation.
+    /// Phase 4 — deliberation (§5.3, §5.5, §5.8).
     ///
-    /// At M2 this is Tier 1 for everyone who needs a plan; there is no budget
-    /// to spend and no model to call. At M3 the budget scheduler picks the top
-    /// N by pressure and everyone else still arrives here, which is why the
-    /// shape of this phase does not change.
+    /// Three things happen, in this order and for a reason.
+    ///
+    /// 1. **Answers that have come back are adopted.** A dispatched call is
+    ///    answered several ticks after it was asked, so its plan is validated
+    ///    against the world *now* rather than only at issue (§5.5). A plan that
+    ///    has gone stale is discarded and recorded as a fallback.
+    /// 2. **Everyone still without a plan gets one from Tier 1.** This is the
+    ///    guarantee of §5.2 and invariant 1: no creature ever stalls waiting
+    ///    for a model, on any hardware, whether or not Ollama is even running.
+    /// 3. **The most pressed few are asked to think properly.** Ranked by
+    ///    §5.3's pressure, scaled by §5.4's age weight, charged §5.5's
+    ///    metabolic cost, and capped by the speed mode's budget.
     fn phase_deliberate(&mut self, report: &mut TickReport) {
         let night = economy::is_night(self.tick, &self.cfg);
         let flagged = std::mem::take(&mut self.flagged);
 
+        self.adopt_completions(report);
+
         for &i in &flagged {
+            if self.creatures[i].plan.is_some() {
+                continue; // a model answer landed for this one first
+            }
+            // Built inline rather than through a helper: a method taking
+            // `&self` borrows the whole struct, and the policy needs the RNG
+            // mutably at the same time. Disjoint field borrows only work when
+            // the compiler can see them.
             let plan = {
                 let ctx = PolicyCtx {
                     world: &self.world,
@@ -715,29 +910,29 @@ impl Sim {
                     cfg: &self.cfg,
                     tick: self.tick,
                     night,
+                    recent_events: &[],
                 };
                 policy::decide(&self.creatures[i], &ctx, &mut self.rng)
             };
-
             let c = &mut self.creatures[i];
             let goal = plan.steps.first().map(|s| s.goal.as_str()).unwrap_or("NONE");
 
-            self.decisions.push(DecisionRecord {
-                tick: self.tick,
-                creature_id: c.id,
-                tier: 1,
-                age_ticks: c.age(self.tick),
-                life_stage: c.life_stage,
-                goal: goal.to_string(),
-                addresses: plan.addresses,
-                rationale: plan.rationale.clone(),
-                horizon_committed: plan.horizon,
-                // Not a failure: at M2 there is no model to fall back *from*.
-                fallback_reason: Some("LLM_NOT_ENABLED_AT_M2"),
-            });
-            // No PLAN_SET event: `decisions` already holds the tick, the
-            // creature, the goal and the committed horizon. Writing it twice
-            // was 338,000 rows per run of pure duplication.
+            self.decisions.push(DecisionRecord::tier1(
+                self.tick,
+                c,
+                goal,
+                plan.addresses,
+                plan.rationale.clone(),
+                plan.horizon,
+                Some(
+                    if self.llm.is_none() {
+                        "LLM_DISABLED"
+                    } else {
+                        "NOT_SELECTED_BY_BUDGET"
+                    }
+                    .to_string(),
+                ),
+            ));
 
             c.last_deliberation_tick = Some(self.tick);
             c.lifetime_deliberations += 1;
@@ -746,7 +941,343 @@ impl Sim {
             c.dirty = true;
             report.deliberations += 1;
         }
+
+        self.dispatch_deliberations(&flagged, report);
+
+        // Deep mode is the one place the wall clock does not matter: §5.6 puts
+        // its tick at 15–60s precisely so a small population can be studied
+        // closely. There, the tick waits for its answers instead of picking
+        // them up several ticks later, so what you are looking at is the world
+        // the model actually saw.
+        if self.mode == crate::sim::runner::SpeedMode::Deep && !self.pending.is_empty() {
+            self.await_deliberations(report);
+        }
+
         self.flagged = flagged;
+    }
+
+    /// Ask the model, for the few creatures whose thinking is worth the most.
+    fn dispatch_deliberations(&mut self, flagged: &[usize], report: &mut TickReport) {
+        if self.llm.is_none() || !self.cfg.features.llm {
+            return;
+        }
+        let budget = crate::ai::budget::budget_for(self.mode, &self.cfg);
+        if budget == 0 {
+            return; // Fast-Forward: Tier 1 alone, which is the S6 control
+        }
+
+        // Expire calls nobody is waiting for any more.
+        let ttl = self.cfg.deliberation.dispatch_ttl_ticks as i64;
+        let tick = self.tick;
+        let before = self.pending.len();
+        self.pending.retain(|_, issued| tick - *issued <= ttl);
+        self.llm_stats.expired += (before - self.pending.len()) as u64;
+
+        // How long an answer takes, in ticks, measured rather than assumed.
+        // Deep mode waits for its answers, so the round trip is nothing.
+        let latency_ticks = if self.mode == crate::sim::runner::SpeedMode::Deep {
+            0.5
+        } else {
+            self.observed_latency_ticks()
+        };
+
+        // Rank the flagged by how much they want to think.
+        let mut ranked: Vec<(usize, f32, bool)> = flagged
+            .iter()
+            .filter_map(|&i| {
+                let c = self.creatures.get(i)?;
+                if self.pending.contains_key(&c.id) {
+                    return None;
+                }
+                let p = crate::ai::budget::pressure_for(
+                    c,
+                    self.tick,
+                    &self.cfg,
+                    c.plan.is_some(),
+                    true,
+                    false,
+                    self.courtships.pending_for(c.id).is_some(),
+                    self.selected == Some(c.id),
+                );
+                let depth = crate::ai::budget::depth_for(c, self.tick, &self.cfg, p.crisis);
+                if !crate::ai::budget::can_afford(c, depth, p.crisis, &self.cfg) {
+                    return None;
+                }
+                // Do not ask about a creature that will not outlive the answer.
+                // Tier 1 is instant and competent; the model's attention is the
+                // scarce thing and should go where it can still be acted on.
+                if !crate::ai::budget::worth_asking(c, self.tick, &self.cfg, latency_ticks) {
+                    return None;
+                }
+                Some((i, p.total(), p.crisis))
+            })
+            .collect();
+        // Descending pressure, creature id as the tiebreak so the choice never
+        // depends on iteration order.
+        ranked.sort_by(|a, b| {
+            b.1.total_cmp(&a.1).then(self.creatures[a.0].id.cmp(&self.creatures[b.0].id))
+        });
+
+        let schema = crate::ai::schema::response_schema(
+            self.cfg.deliberation.model_estimates_horizon,
+        );
+        let mut sent = 0u32;
+        for (i, _, crisis) in ranked {
+            if sent >= budget {
+                break;
+            }
+            let Some(d) = self.llm.as_ref() else { break };
+            if !d.has_room() {
+                break;
+            }
+
+            let id = self.creatures[i].id;
+            let Some((prompt, menu)) = self.deliberation_for(id) else { continue };
+
+            let depth =
+                crate::ai::budget::depth_for(&self.creatures[i], self.tick, &self.cfg, crisis);
+            let (fatigue, hunger) =
+                crate::ai::budget::cost_of(depth, &self.creatures[i], crisis, &self.cfg);
+
+            let req = crate::ai::ollama::Request {
+                creature_id: id,
+                issued_tick: self.tick,
+                prompt,
+                menu,
+                depth,
+                schema: schema.clone(),
+                crisis_exempt: crisis,
+            };
+            if !self.llm.as_ref().unwrap().dispatch(req) {
+                break;
+            }
+
+            // Paid at dispatch: the creature is thinking now, whenever the
+            // answer happens to arrive. Flat per deliberation, never per tick
+            // planned — that is the whole incentive to commit (§5.5).
+            let c = &mut self.creatures[i];
+            c.fatigue = (c.fatigue - fatigue).max(0.0);
+            c.hunger = (c.hunger - hunger).max(0.0);
+            c.lifetime_think_fatigue += fatigue;
+            c.dirty = true;
+
+            self.pending.insert(id, self.tick);
+            self.llm_stats.dispatched += 1;
+            report.llm_dispatched += 1;
+            sent += 1;
+        }
+    }
+
+    /// How many ticks a deliberation takes to come back, from what has
+    /// actually happened rather than from a constant.
+    ///
+    /// Starts pessimistic: until a few calls have completed there is no
+    /// evidence, and guessing low would spend the whole early budget on
+    /// creatures who cannot use it.
+    fn observed_latency_ticks(&self) -> f32 {
+        let st = &self.llm_stats;
+        if st.round_trips < 3 {
+            // No evidence yet. Pessimistic on purpose: guessing low spends the
+            // whole early budget on creatures who cannot use the answer.
+            return 45.0;
+        }
+        st.mean_round_trip_ticks()
+    }
+
+    /// Block until the outstanding calls come back, for Deep mode.
+    fn await_deliberations(&mut self, report: &mut TickReport) {
+        let deadline = std::time::Instant::now()
+            + std::time::Duration::from_millis(self.cfg.llm.timeout_ms * 2);
+        while !self.pending.is_empty() && std::time::Instant::now() < deadline {
+            let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+            let Some(d) = self.llm.as_ref() else { break };
+            // `wait_one` blocks on the channel; the answer is then picked up by
+            // the normal adoption path so there is only one place that decides
+            // whether a plan is still usable.
+            if d.wait_one(remaining.min(std::time::Duration::from_millis(250))).is_none()
+                && self.llm.as_ref().is_some_and(|d| d.outstanding() == 0)
+            {
+                break;
+            }
+            self.adopt_completions(report);
+        }
+        // Anything still outstanding keeps its Tier 1 plan and will be adopted
+        // whenever it does arrive.
+    }
+
+    /// Take delivery of whatever the model has finished thinking about.
+    fn adopt_completions(&mut self, report: &mut TickReport) {
+        let Some(d) = self.llm.as_ref() else { return };
+        let completions = d.collect();
+        if completions.is_empty() {
+            return;
+        }
+
+        for done in completions {
+            self.pending.remove(&done.creature_id);
+            self.llm_stats.round_trip_ticks += (self.tick - done.issued_tick).max(0) as u64;
+            self.llm_stats.round_trips += 1;
+            let Some(i) = self.index_of(done.creature_id) else {
+                // The creature died while the model was thinking about it. The
+                // call still happened and still cost seconds, so it is recorded
+                // rather than dropped: invariant 4 says *every* call is in the
+                // database, and a silently discarded one is exactly the kind of
+                // gap that makes a fallback rate untrustworthy.
+                self.llm_stats.rejected += 1;
+                report.llm_rejected += 1;
+                if let Ok(r) = &done.result {
+                    self.llm_stats.latency_total_ms += r.latency_ms;
+                    self.llm_stats.tokens_prompt += r.prompt_tokens as u64;
+                    self.llm_stats.tokens_cached += r.cached_tokens as u64;
+                    self.llm_stats.tokens_response += r.response_tokens as u64;
+                }
+                self.decisions.push(DecisionRecord {
+                    tick: self.tick,
+                    creature_id: done.creature_id,
+                    tier: 2,
+                    age_ticks: 0,
+                    life_stage: LifeStage::Adult,
+                    goal: "FALLBACK".into(),
+                    addresses: Addresses::Nothing,
+                    rationale: String::new(),
+                    horizon_committed: 0,
+                    fallback_reason: Some("CREATURE_DIED_WHILE_THINKING".into()),
+                    age_weight: 0.0,
+                    think_budget: Some(done.depth.as_str()),
+                    prompt_hash: Some(done.prompt.hash()),
+                    prompt_text: None,
+                    raw_response: done.result.as_ref().ok().map(|r| r.raw.clone()),
+                    fatigue_cost: 0.0,
+                    hunger_cost: 0.0,
+                    crisis_exempt: done.crisis_exempt,
+                    latency_ms: done.result.as_ref().ok().map(|r| r.latency_ms),
+                    model: Some(self.cfg.llm.model.clone()),
+                    fallback_used: true,
+                });
+                continue;
+            };
+            if done.repaired {
+                self.llm_stats.repaired += 1;
+            }
+
+            let (raw, latency, reject) = match &done.result {
+                Ok(r) => {
+                    self.llm_stats.latency_total_ms += r.latency_ms;
+                    self.llm_stats.tokens_prompt += r.prompt_tokens as u64;
+                    self.llm_stats.tokens_cached += r.cached_tokens as u64;
+                    self.llm_stats.tokens_response += r.response_tokens as u64;
+                    (Some(r.raw.clone()), Some(r.latency_ms), None)
+                }
+                Err(e) => {
+                    self.llm_stats.failed += 1;
+                    report.llm_failed += 1;
+                    (None, None, Some(e.as_str().to_string()))
+                }
+            };
+
+            let outcome = match (&done.result, reject) {
+                (Ok(r), _) => crate::ai::schema::validate(&r.raw, &done.menu, &self.cfg)
+                .map_err(|e| e.as_str().to_string()),
+                (Err(_), Some(why)) => Err(why),
+                (Err(_), None) => Err("OLLAMA_FAILED".to_string()),
+            };
+
+            let (plan, why) = match outcome {
+                Ok(v) => {
+                    // The world moved while the model was thinking. §5.5
+                    // validates step one hard at issue time; with a dispatched
+                    // call, "issue time" is now, so it is re-checked here.
+                    let social = crate::sim::actions::SocialView {
+                        people: &self.people,
+                        households: &self.households,
+                        courtships: &self.courtships,
+                    };
+                    let first = &v.steps[0];
+                    if crate::sim::actions::is_legal(
+                        &self.creatures[i], first.goal, first.target,
+                        &self.world, &self.structures, social, &self.cfg,
+                    ) {
+                        (Some(v), None)
+                    } else {
+                        (None, Some("PLAN_WENT_STALE_WHILE_THINKING".to_string()))
+                    }
+                }
+                Err(why) => (None, Some(why)),
+            };
+
+            let c = &self.creatures[i];
+            let age_weight = crate::ai::budget::age_weight(c, self.tick, &self.cfg);
+            let (fatigue, hunger) =
+                crate::ai::budget::cost_of(done.depth, c, done.crisis_exempt, &self.cfg);
+            let keep_text = self
+                .cfg
+                .llm
+                .retain_prompt_text_ticks
+                .is_none_or(|n| true_for_recent(self.tick, n));
+
+            let mut record = DecisionRecord {
+                tick: self.tick,
+                creature_id: c.id,
+                tier: 2,
+                age_ticks: c.age(self.tick),
+                life_stage: c.life_stage,
+                goal: String::new(),
+                addresses: Addresses::Nothing,
+                rationale: String::new(),
+                horizon_committed: 0,
+                fallback_reason: why.clone(),
+                age_weight,
+                think_budget: Some(done.depth.as_str()),
+                prompt_hash: Some(done.prompt.hash()),
+                prompt_text: keep_text.then(|| done.prompt.full_text()),
+                raw_response: raw,
+                fatigue_cost: fatigue,
+                hunger_cost: hunger,
+                crisis_exempt: done.crisis_exempt,
+                latency_ms: latency,
+                model: Some(self.cfg.llm.model.clone()),
+                fallback_used: plan.is_none(),
+            };
+
+            match plan {
+                Some(v) => {
+                    self.llm_stats.accepted += 1;
+                    report.llm_accepted += 1;
+                    record.goal = v.steps[0].goal.as_str().to_string();
+                    record.addresses = v.addresses;
+                    record.rationale = v.rationale.clone();
+                    record.horizon_committed = v.horizon;
+
+                    let c = &mut self.creatures[i];
+                    c.plan = Some(crate::sim::creature::Plan {
+                        steps: v.steps,
+                        step_index: 0,
+                        horizon: v.horizon,
+                        ticks_remaining: v.horizon,
+                        set_tick: self.tick,
+                        rationale: v.rationale,
+                        tier: 2,
+                        addresses: v.addresses,
+                    });
+                    c.last_deliberation_tick = Some(self.tick);
+                    c.dirty = true;
+                    self.events.push(
+                        Event::new(self.tick, EventKind::Deliberated, c.id)
+                            .with_int("horizon", v.horizon as i64)
+                            .with("depth", done.depth.as_str()),
+                    );
+                }
+                None => {
+                    // The creature keeps whatever Tier 1 gave it. That is the
+                    // fallback working, and it is why nothing here can stall a
+                    // creature (invariant 1).
+                    self.llm_stats.rejected += 1;
+                    report.llm_rejected += 1;
+                    record.goal = "FALLBACK".to_string();
+                }
+            }
+            self.decisions.push(record);
+        }
     }
 
     /// Phase 5 — reflex and action execution, then observation.
@@ -906,6 +1437,10 @@ impl Sim {
                     s.dirty = true;
                 }
             }
+        }
+
+        for &(i, _) in dying.iter() {
+            self.personal.remove(&self.creatures[i].id);
         }
 
         // Dead creatures leave the live set, but their final state is staged
@@ -1474,6 +2009,40 @@ impl Sim {
         let _ = report;
     }
 
+    /// Keep a short personal history per creature.
+    ///
+    /// Written before the routine is collapsed, because some of what matters to
+    /// a creature — that it went hungry, that it was fed — is exactly what gets
+    /// folded into counts for the sake of the database.
+    fn record_personal_events(&mut self) {
+        use EventKind as K;
+        for e in &self.events {
+            let Some(actor) = e.actor_id.filter(|id| *id != 0) else { continue };
+            let line = match e.kind {
+                K::Died => continue, // they will not be reading it
+                K::Paired => format!("you paired with #{}", e.target_id.unwrap_or(0)),
+                K::Rejected => format!("#{} turned you down", e.target_id.unwrap_or(0)),
+                K::Conceived => "you are expecting a child".to_string(),
+                K::Born => continue,
+                K::ShelterBuilt => "you built a shelter".to_string(),
+                K::HouseholdFounded => "you founded a household".to_string(),
+                K::Taught => format!("you taught #{}", e.target_id.unwrap_or(0)),
+                K::Injured => "you were hurt working".to_string(),
+                K::FellIll => "you fell ill".to_string(),
+                K::Slaughtered => "you killed a sheep".to_string(),
+                K::Planted => "you planted wheat".to_string(),
+                K::ExposedNight => "you spent a night in the open".to_string(),
+                K::PlanAbandoned => continue,
+                _ => continue,
+            };
+            let log = self.personal.entry(actor).or_default();
+            log.push_front(format!("{} ticks ago: {}", 0, line).replace("0 ticks ago: ", "just now: "));
+            while log.len() > 4 {
+                log.pop_back();
+            }
+        }
+    }
+
     /// Fold the routine into counts.
     ///
     /// Drinking, eating, resting, taking shelter and noticing a bush are things
@@ -1689,6 +2258,79 @@ impl Sim {
         self.node_index.rebuild(&self.world);
         self.people.rebuild(self.creatures.iter(), tick, &self.cfg.knowledge);
         Ok(())
+    }
+
+    /// Build the deliberation context for one creature: the prompt the model
+    /// would see and the menu it may choose from.
+    ///
+    /// Lives here because assembling it needs almost every field of `Sim` at
+    /// once, and because phase 4 and the benchmark harness must build it the
+    /// same way or the measurement is of something the simulation never sends.
+    pub fn deliberation_for(
+        &self,
+        creature_id: i64,
+    ) -> Option<(crate::ai::ollama::Prompt, crate::ai::schema::ActionMenu)> {
+        let c = self.creature(creature_id)?;
+        let recent: Vec<String> = self
+            .personal
+            .get(&creature_id)
+            .map(|q| q.iter().cloned().collect())
+            .unwrap_or_default();
+
+        let ctx = PolicyCtx {
+            world: &self.world,
+            structures: &self.structures,
+            cache: &self.cache,
+            nodes: &self.node_index,
+            people: &self.people,
+            households: &self.households,
+            courtships: &self.courtships,
+            relationships: &self.relationships,
+            cfg: &self.cfg,
+            tick: self.tick,
+            night: economy::is_night(self.tick, &self.cfg),
+            recent_events: &recent,
+        };
+        let menu = crate::ai::prompt::build_menu(c, &ctx);
+        if menu.is_empty() {
+            return None;
+        }
+        let prompt = crate::ai::prompt::assemble(c, &ctx, &menu);
+        Some((prompt, menu))
+    }
+
+    /// What Tier 1 would choose for this creature, right now.
+    ///
+    /// Exists for the S6 comparison: §10 asks for the action distribution of
+    /// LLM-chosen against Tier-1 plans, and warns that if the two converge, S6
+    /// is failing. Asking both about the *same* creature in the *same* state is
+    /// a far sharper instrument than running two whole simulations and
+    /// comparing survivors, and on hardware where a call costs seconds it is
+    /// the only affordable one.
+    pub fn tier1_choice(&mut self, creature_id: i64) -> Option<(String, Addresses)> {
+        let i = self.index_of(creature_id)?;
+        let night = economy::is_night(self.tick, &self.cfg);
+        let plan = {
+            let ctx = PolicyCtx {
+                world: &self.world,
+                structures: &self.structures,
+                cache: &self.cache,
+                nodes: &self.node_index,
+                people: &self.people,
+                households: &self.households,
+                courtships: &self.courtships,
+                relationships: &self.relationships,
+                cfg: &self.cfg,
+                tick: self.tick,
+                night,
+                recent_events: &[],
+            };
+            policy::decide(&self.creatures[i], &ctx, &mut self.rng)
+        };
+        Some((
+            plan.steps.first().map(|s| s.goal.as_str().to_string())?,
+            plan.addresses,
+        ))
     }
 
     /// A stable digest of everything the simulation has produced. Used by the
@@ -1978,6 +2620,108 @@ mod tests {
             "a world that never invalidates a plan is too static to make horizon a real \
              choice (§5.5, §13.8); saw {reasons:?}"
         );
+    }
+
+    // ----------------------------------------------------- deliberation
+
+    #[test]
+    fn every_creature_gets_the_same_system_prompt() {
+        // The cached prefix only works if it is byte-identical across calls, so
+        // this is the property that has to hold — not that the text avoids some
+        // list of words. Measured at M0: a shared prefix takes prompt
+        // evaluation from 3.82s to 0.58s on this hardware, which is the
+        // difference between a watchable Observe mode and an unusable one.
+        let mut sim = sim_with(44127, 30, small_cfg());
+        for _ in 0..40 {
+            sim.step();
+        }
+        let prompts: Vec<_> = sim
+            .creatures
+            .iter()
+            .take(4)
+            .filter_map(|c| sim.deliberation_for(c.id))
+            .collect();
+        assert!(prompts.len() >= 2, "need a couple of creatures to compare");
+
+        let first = &prompts[0].0.system;
+        for (p, _) in &prompts[1..] {
+            assert_eq!(&p.system, first, "the cached prefix must not vary");
+        }
+        // And the creature's own half must vary, or the prompt says nothing.
+        assert_ne!(prompts[0].0.user, prompts[1].0.user);
+    }
+
+    #[test]
+    fn the_menu_only_ever_offers_legal_actions() {
+        // Invariant 3, checked against the engine's own precondition function
+        // rather than against a second opinion about what is legal.
+        use crate::ai::prompt::build_menu;
+        let mut sim = sim_with(44127, 40, small_cfg());
+        for _ in 0..60 {
+            sim.step();
+        }
+
+        let mut checked = 0;
+        for c in sim.creatures.iter().take(12) {
+            let recent: Vec<String> = Vec::new();
+            let ctx = PolicyCtx {
+                world: &sim.world,
+                structures: &sim.structures,
+                cache: &sim.cache,
+                nodes: &sim.node_index,
+                people: &sim.people,
+                households: &sim.households,
+                courtships: &sim.courtships,
+                relationships: &sim.relationships,
+                cfg: &sim.cfg,
+                tick: sim.tick,
+                night: economy::is_night(sim.tick, &sim.cfg),
+                recent_events: &recent,
+            };
+            let social = crate::sim::actions::SocialView {
+                people: &sim.people,
+                households: &sim.households,
+                courtships: &sim.courtships,
+            };
+            for o in build_menu(c, &ctx).options {
+                // The first step is what is validated hard at issue time
+                // (§5.5); later steps are re-checked when reached.
+                let (goal, target, _) = o.steps[0];
+                assert!(
+                    crate::sim::actions::is_legal(
+                        c, goal, target, &sim.world, &sim.structures, social, &sim.cfg,
+                    ),
+                    "offered an illegal option to #{}: {} — {}",
+                    c.id, goal.as_str(), o.label
+                );
+                checked += 1;
+            }
+        }
+        assert!(checked > 20, "only checked {checked} options");
+    }
+
+    #[test]
+    fn an_option_bundles_the_journey_with_the_work() {
+        // §5.5: the expensive thing is the call, not the tokens. An option that
+        // is only a walk wastes most of what a call buys.
+        use crate::ai::prompt::build_menu;
+        let mut sim = sim_with(44127, 30, small_cfg());
+        for _ in 0..60 {
+            sim.step();
+        }
+        let mut compound = 0;
+        for c in sim.creatures.iter().take(10) {
+            let recent: Vec<String> = Vec::new();
+            let ctx = PolicyCtx {
+                world: &sim.world, structures: &sim.structures, cache: &sim.cache,
+                nodes: &sim.node_index, people: &sim.people, households: &sim.households,
+                courtships: &sim.courtships, relationships: &sim.relationships,
+                cfg: &sim.cfg, tick: sim.tick,
+                night: economy::is_night(sim.tick, &sim.cfg), recent_events: &recent,
+            };
+            compound += build_menu(c, &ctx).options.iter().filter(|o| o.steps.len() > 1).count();
+        }
+        assert!(compound > 0, "no option went anywhere and then did something");
     }
 
     // ------------------------------------------------------------- society

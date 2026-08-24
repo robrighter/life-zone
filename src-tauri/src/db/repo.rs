@@ -278,8 +278,12 @@ pub fn insert_decisions(tx: &Transaction, world_id: i64, rows: &[DecisionRecord]
     let mut stmt = tx.prepare_cached(
         "INSERT INTO decisions
            (world_id, tick, creature_id, tier, creature_age_ticks, life_stage,
-            parsed_plan_json, horizon_committed, fallback_used, fallback_reason)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 0, ?9)",
+            age_weight, think_budget, prompt_hash, prompt_text, raw_response,
+            parsed_plan_json, horizon_committed,
+            fatigue_cost, hunger_cost, crisis_exempt,
+            latency_ms, model, fallback_used, fallback_reason)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13,
+                 ?14, ?15, ?16, ?17, ?18, ?19, ?20)",
     )?;
     for d in rows {
         // Compact rather than a full plan blob: at M2 the goal, the intent and
@@ -298,8 +302,19 @@ pub fn insert_decisions(tx: &Transaction, world_id: i64, rows: &[DecisionRecord]
             d.tier as i64,
             d.age_ticks,
             d.life_stage.as_str(),
+            d.age_weight,
+            d.think_budget,
+            d.prompt_hash,
+            d.prompt_text,
+            d.raw_response,
             plan,
             d.horizon_committed as i64,
+            d.fatigue_cost,
+            d.hunger_cost,
+            d.crisis_exempt as i64,
+            d.latency_ms.map(|v| v as i64),
+            d.model,
+            d.fallback_used as i64,
             d.fallback_reason,
         ])?;
     }
@@ -340,7 +355,7 @@ pub fn insert_tick_stats(tx: &Transaction, world_id: i64, r: &TickReport) -> Res
         "INSERT OR REPLACE INTO tick_stats
            (world_id, tick, population, births, deaths, llm_calls, fallbacks,
             mean_latency_ms, phase_timings_json)
-         VALUES (?1, ?2, ?3, ?4, ?5, 0, ?6, NULL, ?7)",
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
     )?
     .execute(rusqlite::params![
         world_id,
@@ -348,7 +363,11 @@ pub fn insert_tick_stats(tx: &Transaction, world_id: i64, r: &TickReport) -> Res
         r.population as i64,
         r.births as i64,
         r.deaths as i64,
-        r.deliberations as i64,
+        r.llm_dispatched as i64,
+        // Invariant 8: the fallback rate is a production metric, so it is a
+        // column rather than something reconstructed from the decision log.
+        (r.llm_rejected + r.llm_failed) as i64,
+        r.mean_latency_ms,
         timings,
     ])?;
     Ok(())
@@ -390,7 +409,7 @@ pub fn upsert_creatures<'a>(
             children_born, guardian_id, taught_count, shared_count)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14,
                  ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27,
-                 ?28, ?29, ?30, ?31, NULL, ?32, ?33, ?34, ?35, ?36,
+                 ?28, ?29, ?30, ?31, ?46, ?32, ?33, ?34, ?35, ?36,
                  ?37, ?38, ?39, ?40, ?41, ?42, ?43, ?44, ?45)
          ON CONFLICT(id) DO UPDATE SET
             household_id = excluded.household_id,
@@ -425,7 +444,8 @@ pub fn upsert_creatures<'a>(
             children_born = excluded.children_born,
             guardian_id = excluded.guardian_id,
             taught_count = excluded.taught_count,
-            shared_count = excluded.shared_count",
+            shared_count = excluded.shared_count,
+            habit_prior_json = excluded.habit_prior_json",
     )?;
     for c in creatures {
         let plan_json = c.plan.as_ref().map(serde_json::to_string).transpose()?;
@@ -475,6 +495,7 @@ pub fn upsert_creatures<'a>(
             c.guardian_id,
             c.taught_count,
             c.shared_count,
+            serde_json::to_string(&c.habit)?,
         ])?;
     }
     Ok(())
@@ -816,7 +837,7 @@ pub fn load_living_creatures(conn: &Connection, world_id: i64) -> Result<Vec<Cre
                 lifetime_deliberations, lifetime_think_fatigue,
                 wear, exposed_ticks, in_shelter, trauma_cause, trauma_tick,
                 mate_id, paired_tick, pregnant_by, due_tick, last_birth_tick,
-                children_born, guardian_id, taught_count, shared_count
+                children_born, guardian_id, taught_count, shared_count, habit_prior_json
          FROM creatures WHERE world_id = ?1 AND death_tick IS NULL ORDER BY id",
     )?;
     let rows = stmt.query_map([world_id], |r| {
@@ -874,6 +895,13 @@ pub fn load_living_creatures(conn: &Connection, world_id: i64) -> Result<Vec<Cre
             guardian_id: r.get(37)?,
             taught_count: r.get(38)?,
             shared_count: r.get(39)?,
+            // Habit is a denormalised summary of this creature's own history
+            // (§7 says exactly that about `habit_prior_json`), so it is stored
+            // as one blob rather than eight columns.
+            habit: r
+                .get::<_, Option<String>>(40)?
+                .and_then(|j| serde_json::from_str(&j).ok())
+                .unwrap_or([0; crate::ai::budget::HABITS]),
             dirty: false,
         })
     })?;

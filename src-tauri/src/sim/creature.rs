@@ -406,6 +406,10 @@ pub struct Creature {
     pub guardian_id: Option<i64>,
     pub taught_count: i32,
     pub shared_count: i32,
+    /// What has actually worked for this creature, counted by what the plan was
+    /// for. Elders fall back on this rather than on the generic policy (§5.4) —
+    /// crystallised experience rather than fresh reasoning.
+    pub habit: [u8; crate::ai::budget::HABITS],
 
     /// Set when the row differs from what is in SQLite.
     pub dirty: bool,
@@ -690,6 +694,7 @@ pub mod testing {
             guardian_id: None,
             taught_count: 0,
             shared_count: 0,
+            habit: [0; crate::ai::budget::HABITS],
             dirty: true,
         }
     }

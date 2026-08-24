@@ -58,11 +58,23 @@ impl SpeedMode {
     /// is none — every mode would otherwise run at Fast-Forward speed and
     /// Observe would be unwatchable. So Observe and Deep are paced here for
     /// human eyes, and take their real timings when the model lands at M3.
-    fn tick_interval(self) -> Option<Duration> {
+    fn tick_interval(self, deliberating: bool) -> Option<Duration> {
         match self {
-            SpeedMode::Deep => Some(Duration::from_millis(500)),
-            SpeedMode::Observe => Some(Duration::from_millis(140)),
-            SpeedMode::Focus => Some(Duration::from_millis(220)),
+            SpeedMode::Deep => Some(Duration::from_millis(if deliberating { 2_000 } else { 500 })),
+            // §5.6 puts Observe at 1–2s per tick, and that number exists
+            // because of the model. M2 paced it at 140ms — correct when there
+            // was nothing to wait for, and wrong the moment there is: at seven
+            // ticks a second a deliberation comes back 200 ticks after it was
+            // asked, which is a third of a creature's life. A second a tick
+            // brings the round trip down to single figures and is what the PRD
+            // specified in the first place.
+            SpeedMode::Observe => {
+                Some(Duration::from_millis(if deliberating { 1_000 } else { 140 }))
+            }
+            SpeedMode::Focus => {
+                Some(Duration::from_millis(if deliberating { 700 } else { 220 }))
+            }
+            // No LLM at all here, by definition (§5.6): Tier 1 and nothing else.
             SpeedMode::FastForward => None,
         }
     }
@@ -92,7 +104,8 @@ pub struct CreatureDot {
     pub y: u32,
     /// 0 infant, 1 adult, 2 elder.
     pub stage: u8,
-    /// Bit flags: 1 hungry, 2 thirsty, 4 cold, 8 sheltered, 16 at a fire.
+    /// Bit flags: 1 hungry, 2 thirsty, 4 cold, 8 sheltered, 16 at a fire,
+    /// 32 thinking (a call is in flight), 64 running a plan the model wrote.
     pub flags: u8,
 }
 
@@ -245,6 +258,19 @@ pub struct Snapshot {
     pub beliefs_taught: u64,
     pub beliefs_shared: u64,
 
+    /// §5.8 and invariant 8: a rising fallback rate is the LLM quietly ceasing
+    /// to matter, and that is the S6 failure. It belongs on the dashboard.
+    pub llm_enabled: bool,
+    pub llm_model: String,
+    pub llm_dispatched: u64,
+    pub llm_accepted: u64,
+    pub llm_in_flight: u32,
+    pub fallback_rate: f32,
+    pub mean_latency_ms: f32,
+    pub cache_hit_rate: f32,
+    /// Share of live creatures currently running a plan the model wrote.
+    pub on_model_plans: f32,
+
     pub creatures: Vec<CreatureDot>,
     pub structures: Vec<StructureDot>,
     pub events: Vec<TickerLine>,
@@ -279,6 +305,10 @@ impl Default for Snapshot {
             households: 0, households_at_reserve: 0, mean_store: 0.0,
             paired: 0, expecting: 0, deepest_generation: 1,
             beliefs_taught: 0, beliefs_shared: 0,
+            llm_enabled: false, llm_model: String::new(),
+            llm_dispatched: 0, llm_accepted: 0, llm_in_flight: 0,
+            fallback_rate: 0.0, mean_latency_ms: 0.0, cache_hit_rate: 0.0,
+            on_model_plans: 0.0,
             creatures: Vec::new(), structures: Vec::new(), events: Vec::new(),
             selected: None, nodes_version: 0,
             known: Vec::new(), known_dim: 0, known_cell: 8,
@@ -387,6 +417,11 @@ impl SimThread {
 
     /// Run until told to shut down. Owns the world for its whole life.
     pub fn run(mut self) {
+        self.sim.mode = self.mode;
+        // Start the model here rather than in `Sim::new`: every test builds a
+        // simulation, and none of them should spawn worker threads or need
+        // Ollama to be running.
+        self.sim.enable_llm();
         self.publish_terrain();
         self.publish_nodes();
         self.emit(&TickReport::default(), true);
@@ -420,6 +455,19 @@ impl SimThread {
             }
             let elapsed = started.elapsed();
 
+            // Tell the simulation how fast it is actually being run: whether a
+            // deliberation is worth dispatching depends on how many ticks pass
+            // while the model thinks, not on how many seconds.
+            self.sim.ticks_per_second = if elapsed.as_secs_f32() > 0.0 {
+                let paced = self
+                    .mode
+                    .tick_interval(self.sim.llm.is_some())
+                    .map(|i| i.as_secs_f32().max(elapsed.as_secs_f32()))
+                    .unwrap_or(elapsed.as_secs_f32());
+                1.0 / paced.max(0.001)
+            } else {
+                self.sim.ticks_per_second
+            };
             self.taught_total += report.beliefs_taught as u64;
             self.shared_total += report.beliefs_shared as u64;
             self.recent_tick_us.push_back(elapsed.as_micros() as u64);
@@ -446,7 +494,7 @@ impl SimThread {
                 self.publish_nodes();
             }
 
-            if let Some(interval) = self.mode.tick_interval() {
+            if let Some(interval) = self.mode.tick_interval(self.sim.llm.is_some()) {
                 if let Some(rest) = interval.checked_sub(elapsed) {
                     std::thread::sleep(rest);
                 }
@@ -494,14 +542,23 @@ impl SimThread {
                 self.steps_left = n.max(1);
                 self.running = false;
             }
-            SimCommand::SetMode(m) => self.mode = m,
+            SimCommand::SetMode(m) => {
+                self.mode = m;
+                // The budget is a simulation fact, not a rendering one (§5.6).
+                self.sim.mode = m;
+            }
             SimCommand::Select(id) => {
                 self.selected = id;
+                // §5.3's narrative weight: whoever is being watched is worth
+                // thinking about.
+                self.sim.selected = id;
                 let report = TickReport { tick: self.sim.tick, ..Default::default() };
                 self.emit(&report, true);
             }
             SimCommand::Regenerate { seed, creatures } => {
                 self.regenerate(seed, creatures);
+                self.sim.mode = self.mode;
+                self.sim.enable_llm();
             }
             SimCommand::Shutdown => return Flow::Stop,
         }
@@ -594,6 +651,7 @@ impl SimThread {
         let night = economy::is_night(tick, cfg);
         let n = &cfg.needs;
 
+        let thinking = self.sim.pending_ids();
         let mut infants = 0;
         let mut adults = 0;
         let mut elders = 0;
@@ -613,6 +671,11 @@ impl SimThread {
                 if c.warmth < n.deficit_threshold { flags |= 4; }
                 if c.in_shelter.is_some() { flags |= 8; }
                 if c.at_fire { flags |= 16; }
+                // §9.1's deliberation heatmap: who the model is actually
+                // spending attention on. The debugging tool for §5.3, and the
+                // thing that makes an invisible budget visible.
+                if thinking.contains(&c.id) { flags |= 32; }
+                if c.plan.as_ref().is_some_and(|p| p.tier == 2) { flags |= 64; }
                 CreatureDot { id: c.id, x: c.x, y: c.y, stage, flags }
             })
             .collect();
@@ -663,6 +726,7 @@ impl SimThread {
         } else {
             live.iter().map(|h| h.stored_food()).sum::<f32>() / live_households as f32
         };
+        let st = self.sim.llm_stats;
         let paired = self.sim.creatures.iter().filter(|c| c.mate_id.is_some()).count() as u32;
         let expecting =
             self.sim.creatures.iter().filter(|c| c.pregnancy.is_some()).count() as u32;
@@ -698,6 +762,26 @@ impl SimThread {
             deepest_generation,
             beliefs_taught: self.taught_total,
             beliefs_shared: self.shared_total,
+            llm_enabled: self.sim.llm.is_some(),
+            llm_model: self.sim.cfg.llm.model.clone(),
+            llm_dispatched: st.dispatched,
+            llm_accepted: st.accepted,
+            llm_in_flight: self.sim.llm.as_ref().map(|d| d.outstanding()).unwrap_or(0) as u32,
+            fallback_rate: st.fallback_rate(),
+            mean_latency_ms: st.mean_latency_ms(),
+            cache_hit_rate: if st.tokens_prompt == 0 {
+                0.0
+            } else {
+                st.tokens_cached as f32 / st.tokens_prompt as f32
+            },
+            on_model_plans: if self.sim.creatures.is_empty() {
+                0.0
+            } else {
+                self.sim.creatures.iter().filter(|c| {
+                    c.plan.as_ref().is_some_and(|p| p.tier == 2)
+                }).count() as f32
+                    / self.sim.creatures.len() as f32
+            },
             creatures,
             structures,
             events: self.ticker.iter().cloned().collect(),

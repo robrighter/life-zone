@@ -167,7 +167,7 @@ impl Target {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Step {
     pub goal: Goal,
     pub target: Target,

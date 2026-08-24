@@ -32,6 +32,16 @@ tracing-appender = "0.2"
 
 anyhow = "1"
 thiserror = "2"
+
+# Blocking HTTP for the Ollama client. Deliberately not reqwest: the simulation
+# thread is synchronous and owns its own concurrency, so pulling in a tokio
+# runtime would buy nothing and complicate the one place in the codebase where
+# determinism matters most.
+# No TLS: Ollama is a local HTTP endpoint on the loopback interface, and the
+# app makes no other network calls at all (BUILD.md §7.5 — the CSP forbids
+# off-origin requests). Pulling in rustls costs a `ring` build that needs an
+# assembler this ARM64 host does not have, to secure a connection to 127.0.0.1.
+ureq = { version = "2", default-features = false, features = ["json"] }
 time = { version = "0.3", features = ["formatting", "macros"] }
 
 [profile.dev]

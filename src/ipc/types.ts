@@ -63,6 +63,10 @@ export const FLAG_THIRSTY = 2;
 export const FLAG_COLD = 4;
 export const FLAG_SHELTERED = 8;
 export const FLAG_AT_FIRE = 16;
+/** A deliberation is in flight for this creature (§9.1's heatmap). */
+export const FLAG_THINKING = 32;
+/** Currently running a plan the model wrote, rather than Tier 1's. */
+export const FLAG_MODEL_PLAN = 64;
 
 export interface CreatureDot {
   id: number;
@@ -190,6 +194,17 @@ export interface Snapshot {
   deepest_generation: number;
   beliefs_taught: number;
   beliefs_shared: number;
+
+  llm_enabled: boolean;
+  llm_model: string;
+  llm_dispatched: number;
+  llm_accepted: number;
+  llm_in_flight: number;
+  /** Invariant 8: a rising fallback rate is the LLM ceasing to matter. */
+  fallback_rate: number;
+  mean_latency_ms: number;
+  cache_hit_rate: number;
+  on_model_plans: number;
 
   creatures: CreatureDot[];
   structures: StructureDot[];

@@ -37,4 +37,7 @@ export async function getTerrain(): Promise<Uint8Array> {
 
 export type * from "./types";
 // The flag constants are values, not types, so they need a value re-export.
-export { FLAG_HUNGRY, FLAG_THIRSTY, FLAG_COLD, FLAG_SHELTERED, FLAG_AT_FIRE } from "./types";
+export {
+  FLAG_HUNGRY, FLAG_THIRSTY, FLAG_COLD, FLAG_SHELTERED, FLAG_AT_FIRE,
+  FLAG_THINKING, FLAG_MODEL_PLAN,
+} from "./types";
