@@ -1,0 +1,7 @@
+# Resolve "stable" for the *host* triple rather than inheriting a rustup default
+# that may be set to another architecture. The dev machine is ARM64
+# (Snapdragon X Elite); building x86_64 there runs the simulation under Prism
+# emulation, which M2's <50ms tick budget cannot afford. On an x86_64 host this
+# file resolves to the x86_64 toolchain, so it stays portable.
+[toolchain]
+channel = "stable"

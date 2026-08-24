@@ -1,0 +1,163 @@
+/* ==========================================================================
+   Life Zone — alternate palettes
+   Applied via data-palette on <html>. Default (no attribute) is "unlit".
+   All three categorical sets are validated against their own surface.
+   ========================================================================== */
+
+/* --------------------------------------------------------------------------
+   B · SURVEY — a field survey office, not a telemetry console.
+   Cool paper ground. The knowledge map inverts beautifully here: unexplored
+   territory is simply unprinted paper, the way a real incomplete map looks.
+   The quick/still duality inverts too — life is deep bottle green, death is
+   faint pencil. Green against grey reads as living-versus-withered, which is a
+   more literal claim than amber-versus-bone but a faster one to read. The green
+   leans slightly blue so it separates from the olive of wood and the sage of
+   the terrain it stands on.
+   -------------------------------------------------------------------------- */
+:root[data-palette="survey"] {
+  --void: #EDEFEC;        /* unprinted paper — the unknown */
+  --surface: #E4E8E8;
+  --panel: #DDE2E1;
+  --raised: #D2D8D7;
+  --line: #B6C0BF;
+  --line-soft: #C7CFCE;
+
+  --ink: #16211F;
+  --ink-2: #46555A;
+  --ink-3: #74858A;
+
+  --quick: #005E3E;       /* alive — bottle green */
+  --still: #93A0A4;       /* dead — pencil */
+
+  --c1: #af3e30;  /* iron  */
+  --c2: #2459a5;  /* ink   */
+  --c3: #9d7000;  /* ochre */
+  --c4: #008668;  /* teal  */
+  --c5: #85356e;  /* plum  */
+  --c6: #718b42;  /* olive */
+
+  --res-wheat: #9d7000;
+  --res-wood: #718b42;
+  --res-forage: #af3e30;
+
+  --st-good: #1B7A55;
+  --st-warn: #97701A;
+  --st-serious: #B5591F;
+  --st-critical: #A8322A;
+
+  --seq-1: #D3D9D8;
+  --seq-2: #B2BFBE;
+  --seq-3: #8AA0A2;
+  --seq-4: #5B7C84;
+  --seq-5: #2B5461;
+
+  --t-deep: #A9BECB;
+  --t-shallow: #C2D4DC;
+  --t-grass: #D5DBC8;
+  --t-forest: #BCCBB4;
+  --t-soil: #DCD2BE;
+  --t-hill: #D2D4D2;
+  --t-sand: #E4DECA;
+}
+
+/* --------------------------------------------------------------------------
+   C · STRATA — an excavation section drawing.
+   Warm umber ground instead of cold teal-black. The palette of soil profiles:
+   ochre, iron oxide, verdigris, chalk. Older and slower-feeling than "unlit",
+   and it suits a register of the dead — generations stacking like sediment.
+   Life is a hot ember; death is chalk.
+   -------------------------------------------------------------------------- */
+:root[data-palette="strata"] {
+  --void: #120E0B;
+  --surface: #17120E;
+  --panel: #1D1713;
+  --raised: #251E18;
+  --line: #362C23;
+  --line-soft: #292118;
+
+  --ink: #EFE7DC;
+  --ink-2: #B3A493;
+  --ink-3: #7D6F60;
+
+  --quick: #E8823A;       /* alive — ember */
+  --still: #B9AFA0;       /* dead — chalk */
+
+  --c1: #bf890d;  /* ochre     */
+  --c2: #4370b2;  /* slate     */
+  --c3: #339d89;  /* verdigris */
+  --c4: #b14533;  /* iron      */
+  --c5: #a19341;  /* sand      */
+  --c6: #9d538a;  /* plum      */
+
+  --res-wheat: #bf890d;
+  --res-wood: #a19341;
+  --res-forage: #b14533;
+
+  --st-good: #4AAE88;
+  --st-warn: #C89A2C;
+  --st-serious: #D9762F;
+  --st-critical: #C8493A;
+
+  --seq-1: #2A1F15;
+  --seq-2: #4C3618;
+  --seq-3: #77531A;
+  --seq-4: #A3741B;
+  --seq-5: #D19A2E;
+
+  --t-deep: #16202A;
+  --t-shallow: #1E3340;
+  --t-grass: #2B291A;
+  --t-forest: #202417;
+  --t-soil: #33251A;
+  --t-hill: #2A2622;
+  --t-sand: #3A3122;
+}
+
+/* the paper theme needs a couple of weight corrections, not a redesign */
+:root[data-palette="survey"] body { background: var(--void); }
+:root[data-palette="survey"] .brand::before { box-shadow: 0 0 8px 1px rgba(0,94,62,.32); }
+:root[data-palette="survey"] .btn[aria-pressed="true"] { color: #FFF; }
+:root[data-palette="survey"] .btn[aria-pressed="true"] .sub { color: rgba(255,255,255,.75); }
+:root[data-palette="survey"] .lifespan::after { box-shadow: none; }
+:root[data-palette="survey"] .lifespan { background: linear-gradient(90deg, rgba(22,33,31,.14) 0 25%, rgba(22,33,31,.05) 25% 87.5%, rgba(22,33,31,.14) 87.5% 100%); }
+:root[data-palette="survey"] .lifespan::before { background: linear-gradient(90deg, rgba(0,94,62,.45), rgba(0,94,62,.95)); }
+:root[data-palette="survey"] .lifespan.is-dead::before { background: linear-gradient(90deg, rgba(147,160,164,.4), rgba(147,160,164,.8)); }
+:root[data-palette="survey"] .lifespan .zone-div { background: rgba(237,239,236,.95); }
+:root[data-palette="survey"] .map-legend,
+:root[data-palette="survey"] .scalebar { background: rgba(237,239,236,.9); }
+:root[data-palette="survey"] pre.prompt { background: #F3F4F1; }
+:root[data-palette="survey"] .tip { background: rgba(28,38,36,.96); color: #EDEFEC; border-color: #16211F; }
+:root[data-palette="survey"] .tip .tip-t { color: #A9B6B4; }
+:root[data-palette="survey"] .map-legend .mk { box-shadow: 0 0 0 1.5px rgba(237,239,236,.95); }
+
+/* ------------------------------------------------------------ the switcher */
+
+.pal-switch { display: flex; align-items: center; gap: 4px; }
+.pal-switch .eyebrow { margin-right: 3px; }
+.pal-switch button {
+  font-family: var(--mono);
+  font-size: 10px;
+  letter-spacing: .06em;
+  text-transform: uppercase;
+  color: var(--ink-3);
+  background: transparent;
+  border: 1px solid var(--line);
+  border-radius: var(--r);
+  padding: 4px 7px;
+  cursor: pointer;
+}
+.pal-switch button:hover { color: var(--ink); }
+.pal-switch button[aria-pressed="true"] {
+  color: var(--ink);
+  border-color: var(--quick);
+  background: var(--raised);
+}
+.pal-switch button::before {
+  content: '';
+  display: inline-block;
+  width: 7px; height: 7px;
+  border-radius: 50%;
+  margin-right: 5px;
+  vertical-align: -1px;
+  background: var(--sw, var(--quick));
+}
