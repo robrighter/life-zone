@@ -1,17 +1,19 @@
 //! Life Zone — a locally-run simulation of a community of creatures.
 //!
-//! M0 scaffold: the app opens, the database migrates, a world row exists, and
-//! an empty render loop runs. The simulation itself lands at M1/M2.
+//! M1: a seeded world generates, persists in chunks, and renders. The tick
+//! pipeline and creatures land at M2.
 
 pub mod config;
 pub mod db;
 pub mod logging;
+pub mod sim;
 
 use anyhow::Result;
 use config::WorldConfig;
-use db::repo::{self, World};
+use db::repo::{self, WorldRow};
 use rusqlite::Connection;
 use serde::Serialize;
+use sim::world::{Founder, ResourceNode, World};
 use std::sync::Mutex;
 use tauri::Manager;
 
@@ -24,6 +26,10 @@ use tauri::Manager;
 pub struct AppState {
     pub conn: Mutex<Connection>,
     pub world_id: i64,
+    /// The generated world. Behind a Mutex for M1, where only the UI reads it.
+    /// At M2 the sim thread takes exclusive ownership and this becomes a
+    /// snapshot channel instead.
+    pub world: Mutex<Option<World>>,
 }
 
 #[derive(Serialize)]
@@ -60,14 +66,91 @@ fn get_world(state: tauri::State<'_, AppState>) -> Result<WorldSummary, String> 
 }
 
 #[tauri::command]
-fn list_worlds(state: tauri::State<'_, AppState>) -> Result<Vec<World>, String> {
+fn list_worlds(state: tauri::State<'_, AppState>) -> Result<Vec<WorldRow>, String> {
     let conn = state.conn.lock().map_err(|e| e.to_string())?;
     repo::list_worlds(&conn).map_err(|e| e.to_string())
 }
 
-/// Reuse the newest active world, or create one on first run. Worldgen itself
-/// is M1; this only establishes the row and its config.
-fn bootstrap_world(conn: &Connection) -> Result<World> {
+#[derive(Serialize)]
+pub struct WorldMeta {
+    pub width: u32,
+    pub height: u32,
+    pub chunk_size: u32,
+    pub seed: i64,
+    pub nodes: Vec<ResourceNode>,
+    pub founders: Vec<Founder>,
+}
+
+/// Terrain as raw bytes, one per tile, row-major. At 512x512 that is 256KB;
+/// serialising it as a JSON array of numbers instead would be several megabytes
+/// of text for the webview to parse on every load.
+#[tauri::command]
+fn get_terrain(state: tauri::State<'_, AppState>) -> Result<tauri::ipc::Response, String> {
+    let world = state.world.lock().map_err(|e| e.to_string())?;
+    let w = world.as_ref().ok_or("no world generated")?;
+    Ok(tauri::ipc::Response::new(w.terrain_bytes()))
+}
+
+#[tauri::command]
+fn get_world_meta(state: tauri::State<'_, AppState>) -> Result<WorldMeta, String> {
+    let world = state.world.lock().map_err(|e| e.to_string())?;
+    let w = world.as_ref().ok_or("no world generated")?;
+    Ok(WorldMeta {
+        width: w.width, height: w.height, chunk_size: w.chunk_size,
+        seed: w.seed as i64,
+        nodes: w.nodes.clone(),
+        founders: w.founders.clone(),
+    })
+}
+
+/// Generate a fresh world from a seed, replacing the current one.
+#[tauri::command]
+fn regenerate_world(
+    state: tauri::State<'_, AppState>,
+    seed: i64,
+) -> Result<WorldMeta, String> {
+    let mut conn = state.conn.lock().map_err(|e| e.to_string())?;
+    let config = repo::load_world_config(&conn, state.world_id)
+        .map_err(|e| e.to_string())?
+        .unwrap_or_default();
+
+    let t0 = std::time::Instant::now();
+    let out = sim::worldgen::generate(seed as u64, &config);
+    let gen_ms = t0.elapsed().as_millis();
+
+    repo::save_world(&mut conn, state.world_id, &out.world).map_err(|e| e.to_string())?;
+    conn.execute("UPDATE worlds SET seed = ?2 WHERE id = ?1",
+                 rusqlite::params![state.world_id, seed])
+        .map_err(|e| e.to_string())?;
+
+    let meta = WorldMeta {
+        width: out.world.width, height: out.world.height,
+        chunk_size: out.world.chunk_size, seed,
+        nodes: out.world.nodes.clone(), founders: out.world.founders.clone(),
+    };
+    tracing::info!(seed, gen_ms, rejected = out.rejected, "regenerated world");
+
+    *state.world.lock().map_err(|e| e.to_string())? = Some(out.world);
+    Ok(meta)
+}
+
+/// Whether to run the render benchmark automatically on load. Off unless
+/// LIFE_ZONE_BENCH is set, so it never intrudes on normal use.
+#[tauri::command]
+fn bench_mode() -> bool {
+    std::env::var("LIFE_ZONE_BENCH").is_ok()
+}
+
+/// Record a render benchmark from the frontend. The renderer is the only place
+/// that can measure real frame intervals, but the log is where a measured
+/// result belongs.
+#[tauri::command]
+fn report_bench(result: serde_json::Value) {
+    tracing::info!(target: "bench", result = %result, "render benchmark");
+}
+
+/// Reuse the newest active world, or create one on first run.
+fn bootstrap_world(conn: &Connection) -> Result<WorldRow> {
     if let Some(existing) = repo::latest_active_world(conn)? {
         tracing::info!(world_id = existing.id, name = %existing.name,
                        tick = existing.current_tick, "resuming world");
@@ -78,6 +161,39 @@ fn bootstrap_world(conn: &Connection) -> Result<World> {
     // offer new-world-from-seed at M1.
     let world = repo::create_world(conn, "Ashfen", 44127, &WorldConfig::default())?;
     Ok(world)
+}
+
+/// Reload the persisted grid, or generate and save it on first run.
+///
+/// Founders are deliberately not reloaded: they are a worldgen output that M2
+/// turns into rows in `creatures`, which is where they will persist. At M1
+/// there are no creatures yet, so an empty list after a restart is correct.
+fn load_or_generate_world(
+    conn: &mut Connection,
+    world_row: &WorldRow,
+    config: &WorldConfig,
+) -> Result<World> {
+    let (w, h, cs) = (config.map.width, config.map.height, config.map.chunk_size);
+
+    if let Some(tiles) = repo::load_terrain(conn, world_row.id, w, h, cs)? {
+        let nodes = repo::load_resource_nodes(conn, world_row.id)?;
+        tracing::info!(world_id = world_row.id, tiles = tiles.len(), nodes = nodes.len(),
+                       "loaded persisted world");
+        return Ok(World {
+            width: w, height: h, chunk_size: cs,
+            seed: world_row.seed as u64,
+            tiles, nodes, founders: Vec::new(),
+        });
+    }
+
+    let t0 = std::time::Instant::now();
+    let out = sim::worldgen::generate(world_row.seed as u64, config);
+    let gen_ms = t0.elapsed().as_millis();
+
+    repo::save_world(conn, world_row.id, &out.world)?;
+    tracing::info!(world_id = world_row.id, gen_ms, rejected = out.rejected,
+                   "generated and persisted world");
+    Ok(out.world)
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -93,15 +209,24 @@ pub fn run() {
             let db_path = data_dir.join("life-zone.sqlite3");
             tracing::info!(path = %db_path.display(), "opening database");
 
-            let conn = db::open(&db_path)?;
-            let world = bootstrap_world(&conn)?;
+            let mut conn = db::open(&db_path)?;
+            let world_row = bootstrap_world(&conn)?;
+            let config = repo::load_world_config(&conn, world_row.id)?.unwrap_or_default();
+            let world = load_or_generate_world(&mut conn, &world_row, &config)?;
 
-            app.manage(AppState { conn: Mutex::new(conn), world_id: world.id });
+            app.manage(AppState {
+                conn: Mutex::new(conn),
+                world_id: world_row.id,
+                world: Mutex::new(Some(world)),
+            });
 
-            tracing::info!(world_id = world.id, "startup complete");
+            tracing::info!(world_id = world_row.id, "startup complete");
             Ok(())
         })
-        .invoke_handler(tauri::generate_handler![get_world, list_worlds])
+        .invoke_handler(tauri::generate_handler![
+            get_world, list_worlds, get_world_meta, get_terrain, regenerate_world,
+            bench_mode, report_bench
+        ])
         .run(tauri::generate_context!())
         .expect("error while running Life Zone");
 }

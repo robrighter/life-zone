@@ -740,3 +740,24 @@ pre.prompt .cm { color: var(--ink-3); }
 .map-canvas { display: block; width: 100%; height: 100%; }
 
 .readout .val.err { color: var(--st-critical); font-size: 12px; }
+
+/* Sidebar legend runs vertically rather than the mockup's inline wrap. */
+.legend.legend-col { flex-direction: column; gap: 4px; margin-top: 0; }
+.legend.legend-col .item { width: 100%; }
+.legend .legend-n { margin-left: auto; color: var(--ink-3); }
+.legend .sw-sheep { border-radius: 50%; background: var(--ink-2); opacity: .72; }
+
+.seed-input {
+  flex: 1; min-width: 0;
+  font-family: var(--mono); font-size: 12px;
+  color: var(--ink); background: var(--surface);
+  border: 1px solid var(--line); border-radius: var(--r);
+  padding: 5px 8px;
+}
+.seed-input:focus { outline: none; border-color: var(--quick); }
+
+.hint { font-size: 10px; color: var(--ink-3); margin: 9px 0 0; line-height: 1.4; }
+.stage-empty {
+  display: flex; align-items: center; justify-content: center; height: 100%;
+  font-family: var(--mono); font-size: 12px; color: var(--ink-3);
+}

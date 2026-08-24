@@ -27,3 +27,29 @@ export interface WorldSummary {
   created_at: string;
   config: WorldConfig;
 }
+
+export type NodeKind = "FORAGE" | "WOOD" | "WHEAT" | "SHEEP";
+
+export interface ResourceNode {
+  kind: NodeKind;
+  x: number;
+  y: number;
+  quantity: number;
+  max_quantity: number;
+  regen_rate: number;
+}
+
+export interface Founder {
+  x: number;
+  y: number;
+  female: boolean;
+}
+
+export interface WorldMeta {
+  width: number;
+  height: number;
+  chunk_size: number;
+  seed: number;
+  nodes: ResourceNode[];
+  founders: Founder[];
+}

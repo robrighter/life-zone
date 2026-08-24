@@ -57,8 +57,11 @@ pub struct ResourceConfig {
 impl Default for ResourceConfig {
     fn default() -> Self {
         Self {
-            forage_density: 0.010, wood_density: 0.014, soil_density: 0.006,
-            sheep_flocks: 12,
+            // Fractions of the terrain that suits each kind, not of the whole
+            // map. Tuned so forest reads as ground with patches in it rather
+            // than as a crosshatch of markers.
+            forage_density: 0.006, wood_density: 0.008, soil_density: 0.012,
+            sheep_flocks: 14,
             forage_regen_per_tick: 0.02, wood_regen_per_tick: 0.008,
             forage_spoil_ticks: 48,   // ~2 days
             meat_spoil_ticks: 96,     // ~4 days
