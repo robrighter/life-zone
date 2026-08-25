@@ -39,6 +39,8 @@ pub enum EventKind {
     PlanAbandoned,
     Spoiled,
     ExposedNight,
+    /// A warmth errand arrived and could not be completed, with the reason.
+    ShelterRefused,
     Injured,
     FellIll,
     Settled,
@@ -95,6 +97,7 @@ impl EventKind {
             EventKind::PlanAbandoned => "PLAN_ABANDONED",
             EventKind::Spoiled => "SPOILED",
             EventKind::ExposedNight => "EXPOSED_NIGHT",
+            EventKind::ShelterRefused => "SHELTER_REFUSED",
             EventKind::Injured => "INJURED",
             EventKind::FellIll => "FELL_ILL",
             EventKind::Settled => "SETTLED",

@@ -738,6 +738,23 @@ fn run_report(seed: u64, creatures: u32, ticks: i64) {
     if let Some(v) = dial("LZ_WHEAT") {
         cfg.features.wheat = v != 0.0;
     }
+    // S7 needs a long run with the model actually answering, which needs two
+    // things this harness did not have: the dispatcher attached, and the sim
+    // paced to wall clock.
+    //
+    // Without pacing the run is meaningless rather than merely fast. The sim
+    // ticks in about 5ms and a call takes ~3s, so an unpaced 2,000-tick run
+    // finishes in ten seconds and perhaps three answers ever come back. Observe
+    // mode exists precisely because deliberation has to be given time to land.
+    let llm_budget = std::env::var("LZ_LLM").ok().and_then(|v| v.parse::<u32>().ok());
+    if let Some(n) = llm_budget {
+        cfg.features.llm = true;
+        cfg.deliberation.budget_observe = n;
+        if let Ok(m) = std::env::var("LZ_MODEL") {
+            cfg.llm.model = m;
+        }
+    }
+    let pace_ms: u64 = std::env::var("LZ_PACE").ok().and_then(|v| v.parse().ok()).unwrap_or(0);
     if let Some(v) = dial("LZ_SHELTER_COST") {
         cfg.actions.shelter_wood_cost = v;
     }
@@ -790,6 +807,15 @@ fn run_report(seed: u64, creatures: u32, ticks: i64) {
         sim.spawn_founders();
     } else {
         sim.spawn_population(creatures);
+    }
+    if llm_budget.is_some() {
+        sim.mode = life_zone_lib::sim::runner::SpeedMode::Observe;
+        sim.enable_llm();
+        println!(
+            "deliberation ON: model {}, budget {} calls/tick, pacing {pace_ms}ms/tick",
+            cfg.llm.model,
+            cfg.deliberation.budget_observe
+        );
     }
 
     println!("== RUN seed {seed}, {} creatures, {ticks} ticks ==",
@@ -845,6 +871,15 @@ fn run_report(seed: u64, creatures: u32, ticks: i64) {
         let mut r = sim.step();
         sim.persist(&mut conn, &mut r, false).expect("persist");
         tick_us.push(t0.elapsed().as_micros() as u64);
+        // Pace to wall clock, so dispatched calls have time to come back. The
+        // tick's own cost is deducted, so this paces rather than adds.
+        if pace_ms > 0 {
+            let spent = t0.elapsed();
+            let want = std::time::Duration::from_millis(pace_ms);
+            if let Some(left) = want.checked_sub(spent) {
+                std::thread::sleep(left);
+            }
+        }
 
         phase[0] += r.timings.world;
         phase[1] += r.timings.needs;

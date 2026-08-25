@@ -74,6 +74,31 @@ impl PolicyCtx<'_> {
         explore_target(c, self, &mut rng)
     }
 
+    /// Whether this creature's hearth is *its own*, rather than one it grew up in.
+    ///
+    /// A child born into a household keeps its membership for life, so
+    /// `hearth()` returns a roof for it forever and it never reads as homeless
+    /// — which meant it never built a house, never founded a household, and
+    /// never opened a store of its own. Measured over 800 ticks: living
+    /// household sizes of 1, 3, 5, 8, 10, 11, 23, 38 and 46, against a shelter
+    /// holding six. The household of 46 turned 40 of its members away every
+    /// night, which is where 1,694 of 2,264 shelter refusals came from.
+    ///
+    /// `Household::size_cap` exists, is set to the shelter's capacity, is
+    /// persisted, and is read by nothing.
+    fn owns_hearth(&self, c: &Creature) -> bool {
+        let Some(id) = c.household_id else { return false };
+        let Some(h) = self.households.get(id) else { return false };
+        h.founder_ids.0 == c.id || h.founder_ids.1 == Some(c.id)
+    }
+
+    /// A grown child with a mate needs a hearth of its own, not a bed in the
+    /// house it was born in. This is what turns a lineage into households
+    /// rather than one ever-growing dormitory (§4.6).
+    fn wants_own_hearth(&self, c: &Creature) -> bool {
+        self.hearth(c).is_none() || (c.is_paired() && !self.owns_hearth(c))
+    }
+
     fn hearth(&self, c: &Creature) -> Option<(i64, u32, u32)> {
         let h = self.households.get(c.household_id?)?;
         let s = self.structures.get(h.shelter_id?)?;
@@ -153,7 +178,7 @@ fn need_profile(c: &Creature, ctx: &PolicyCtx) -> NeedProfile {
     // dropped the target from a shelter's worth of wood to a night's fire, so a
     // couple that wanted a house of their own never carried enough to raise
     // one. Measured: 77 courtships, 11 households.
-    let sheltered_soon = ctx.hearth(c).is_some();
+    let sheltered_soon = !ctx.wants_own_hearth(c);
     let night_pressure = if ctx.night { 1.0 } else { night_proximity(ctx) };
     //
     // How much wood is enough depends on what it is *for*. With a roof in
@@ -460,7 +485,7 @@ pub fn decide(c: &Creature, ctx: &PolicyCtx, rng: &mut ChaCha8Rng) -> Plan {
         .map(|(_, hx, hy)| (hx, hy, None))
         .or_else(|| {
             ctx.structures
-                .nearest_shelter(c.x, c.y, 40)
+                .nearest_shelter(c.x, c.y, 40, c.household_id)
                 .map(|s| (s.x, s.y, Some(s.id)))
         });
     if let Some((sx, sy, sid)) = bed {
@@ -498,7 +523,7 @@ pub fn decide(c: &Creature, ctx: &PolicyCtx, rng: &mut ChaCha8Rng) -> Plan {
         });
     }
 
-    let roof_in_reach = ctx.structures.nearest_shelter(c.x, c.y, 8).is_some();
+    let roof_in_reach = ctx.structures.nearest_shelter(c.x, c.y, 8, c.household_id).is_some();
     if ctx.cfg.features.fires
         && (ctx.night || night_proximity(ctx) > 0.6)
         && !lit_fire_near
@@ -549,7 +574,7 @@ pub fn decide(c: &Creature, ctx: &PolicyCtx, rng: &mut ChaCha8Rng) -> Plan {
     // shelter can be built, so the answer was always "somewhere nearby has
     // room" and 4,271 creatures built 35 shelters between them. Homelessness is
     // a persistent fact about a creature; a free bed is not.
-    let homeless = ctx.hearth(c).is_none();
+    let homeless = ctx.wants_own_hearth(c);
     if homeless
         && wood_held >= ctx.cfg.actions.shelter_wood_cost
         && ctx.world.at(c.x, c.y).passable()
@@ -720,7 +745,7 @@ pub fn decide(c: &Creature, ctx: &PolicyCtx, rng: &mut ChaCha8Rng) -> Plan {
         && c.hunger > 40.0
         && c.thirst > 40.0
     {
-        if let Some(s) = ctx.structures.nearest_shelter(c.x, c.y, 60) {
+        if let Some(s) = ctx.structures.nearest_shelter(c.x, c.y, 60, c.household_id) {
             let t = travel_ticks(c, ctx.cfg, (s.x, s.y));
             if t > 1 {
                 offer(Candidate {

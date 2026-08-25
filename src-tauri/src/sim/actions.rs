@@ -357,7 +357,7 @@ pub fn is_legal(
         Goal::Rest => true,
 
         Goal::Shelter => structures
-            .nearest_shelter(c.x, c.y, 1)
+            .nearest_shelter(c.x, c.y, 1, c.household_id)
             .is_some_and(|s| s.has_room()),
 
         Goal::BuildFire => {
@@ -745,7 +745,26 @@ fn shelter(c: &mut Creature, ctx: &mut ActionCtx) -> Outcome {
     if c.in_shelter.is_some() {
         return Outcome::StepComplete;
     }
-    let Some(id) = ctx.structures.nearest_shelter(c.x, c.y, 1).map(|s| s.id) else {
+    let Some(id) = ctx.structures.nearest_shelter(c.x, c.y, 1, c.household_id).map(|s| s.id) else {
+        // Why it failed, because "precondition failed" on a warmth errand is
+        // 39% of all plan endings and the two causes need opposite fixes.
+        let any = ctx
+            .structures
+            .items
+            .iter()
+            .filter(|s| s.shelters())
+            .map(|s| ((s.x as i64 - c.x as i64).pow(2) + (s.y as i64 - c.y as i64).pow(2), s))
+            .min_by_key(|(d, _)| *d);
+        let detail = match any {
+            Some((d, s)) if d <= 1 => format!("full:{}/{}", s.occupants, s.capacity),
+            Some((d, _)) => format!("nearest:{}", (d as f64).sqrt().round() as i64),
+            None => "none".to_string(),
+        };
+        ctx.events.push(
+            Event::new(ctx.tick, EventKind::ShelterRefused, c.id)
+                .at(c.x, c.y)
+                .with("why", &detail),
+        );
         return Outcome::Failed(AbortReason::PreconditionFailed);
     };
     if let Some(s) = ctx.structures.get_mut(id) {

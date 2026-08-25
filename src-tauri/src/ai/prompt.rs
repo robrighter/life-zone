@@ -266,7 +266,7 @@ pub fn build_menu(c: &Creature, ctx: &PolicyCtx) -> ActionMenu {
             format!("light a fire here, burning {:.0} of your {wood:.0} wood",
                     ctx.cfg.actions.fire_wood_cost));
     }
-    if let Some(s) = ctx.structures.nearest_shelter(c.x, c.y, 40) {
+    if let Some(s) = ctx.structures.nearest_shelter(c.x, c.y, 40, c.household_id) {
         let t = travel((s.x, s.y));
         if t <= 1 {
             add(

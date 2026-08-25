@@ -719,6 +719,7 @@ impl Sim {
         let l = &self.cfg.lifespan;
         let dawn = economy::hour_of(self.tick) == a.night_end_hour;
 
+        let mut grew_up: Vec<i64> = Vec::new();
         for c in self.creatures.iter_mut() {
             c.hunger = (c.hunger - n.hunger_decay_per_tick).max(0.0);
             c.thirst = (c.thirst - n.thirst_decay_per_tick).max(0.0);
@@ -770,8 +771,39 @@ impl Sim {
                 c.wear += (l.malnutrition_aging_multiplier - 1.0) * depth;
             }
 
+            let was = c.life_stage;
             c.life_stage = LifeStage::of(c.age(self.tick), l);
+            if was == LifeStage::Infant && c.life_stage != LifeStage::Infant {
+                grew_up.push(c.id);
+            }
             c.dirty = true;
+        }
+
+        // Growing up ends dependency (§4.6). A child keeps its parents'
+        // household for life otherwise, so `join_household`'s size cap — which
+        // is enforced — never sees the growth, because birth assigns membership
+        // directly and nothing ever gives it up. Measured over 800 ticks:
+        // living households of 1, 3, 5, 8, 10, 11, 23, 38 and 46 against a
+        // shelter that sleeps six, and the largest turning forty of its own
+        // members away every night.
+        //
+        // A grown child leaves the house it was born in and has to pair and
+        // build to have one of its own, which is what a household *is*. The
+        // founders keep theirs.
+        for id in grew_up {
+            let Some(i) = self.index_of(id) else { continue };
+            let Some(hid) = self.creatures[i].household_id else { continue };
+            let founder = self
+                .households
+                .get(hid)
+                .is_some_and(|h| h.founder_ids.0 == id || h.founder_ids.1 == Some(id));
+            if founder {
+                continue;
+            }
+            self.creatures[i].household_id = None;
+            self.creatures[i].dirty = true;
+            self.events
+                .push(Event::new(self.tick, EventKind::HouseholdLeft, id).target(hid));
         }
 
         // At dawn, settle up for the night just past. Each night spent with
@@ -2785,6 +2817,39 @@ mod tests {
         }
         let after: usize = sim.creatures.iter().map(|c| c.beliefs.len()).sum();
         assert!(after > before, "exploring should teach a creature something: {before} -> {after}");
+    }
+
+    #[test]
+    fn a_household_does_not_outgrow_the_house_it_sleeps_in() {
+        // `join_household` enforces `size_cap`, and it never saw the growth:
+        // birth assigns membership directly and nothing ever gave it up, so a
+        // child kept its parents' household for life. Measured over 800 ticks
+        // before this was fixed: living households of 1, 3, 5, 8, 10, 11, 23,
+        // 38 and 46 against a shelter that sleeps six, with the largest turning
+        // forty of its own members away every night — 1,694 of 2,264 shelter
+        // refusals, all at a building holding exactly 6 of 6.
+        let mut cfg = small_cfg();
+        cfg.bench.maintain_population = Some(90);
+        let cap = cfg.actions.shelter_capacity;
+        let mut sim = sim_with(44127, 90, cfg);
+        for _ in 0..600 {
+            sim.step();
+        }
+
+        let mut sizes: std::collections::BTreeMap<i64, u32> = Default::default();
+        for c in sim.creatures.iter().filter(|c| c.is_alive()) {
+            if let Some(h) = c.household_id {
+                *sizes.entry(h).or_default() += 1;
+            }
+        }
+        // Infants cannot leave, so a household can legitimately sit above the
+        // cap for a while; what it must not do is grow without any bound.
+        let worst = sizes.values().copied().max().unwrap_or(0);
+        assert!(
+            worst <= cap * 2,
+            "a household reached {worst} living members against a shelter that \
+             sleeps {cap}: {sizes:?}"
+        );
     }
 
     #[test]
