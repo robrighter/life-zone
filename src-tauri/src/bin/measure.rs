@@ -45,6 +45,11 @@ fn main() {
         }
         // measure report <path-to-sqlite>
         "report" => report_dump(args.get(2).map(|s| s.as_str()).unwrap_or("")),
+        "teach" => {
+            let ticks: i64 = args.get(3).and_then(|s| s.parse().ok()).unwrap_or(700);
+            let calls: usize = args.get(4).and_then(|s| s.parse().ok()).unwrap_or(24);
+            teach_report(seed, ticks, calls);
+        }
         other => eprintln!("unknown command {other}"),
     }
 }
@@ -202,6 +207,124 @@ fn pct(n: usize, total: usize) -> f64 {
 /// Both are asked about the same creature, in the same state, from the same
 /// pre-validated menu. Any difference is therefore the decision and not the
 /// situation.
+/// §13.5, asked directly: **when teaching is on the menu, does the model take it?**
+///
+/// This is the sharpest S6 test the design has and the one S7 turns on.
+/// Teaching costs ticks now and pays off only after the teacher is dead, so it
+/// is something the deterministic policy would never invent — and measurably
+/// does not: TEACH is 3 of 50,310 Tier-1 decisions, while 54-78% of the living
+/// population could teach at any moment.
+///
+/// The general S6 comparison cannot answer this, because it samples whoever is
+/// around and most creatures are not in a household yet. This warms the world
+/// until households exist, keeps only creatures for whom TEACH is actually
+/// legal, and asks the model about those.
+fn teach_report(seed: u64, ticks: i64, calls: usize) {
+    use life_zone_lib::ai::ollama::{Client, Depth};
+    use life_zone_lib::ai::schema;
+    use life_zone_lib::sim::creature::LifeStage;
+
+    let mut cfg = WorldConfig::default();
+    cfg.map.width = 256;
+    cfg.map.height = 256;
+    cfg.bench.maintain_population = Some(120);
+    if let Ok(m) = std::env::var("LZ_MODEL") {
+        cfg.llm.model = m;
+    }
+
+    let world = worldgen::generate(seed, &cfg).world;
+    let mut sim = Sim::new(1, world, cfg.clone(), seed);
+    sim.spawn_population(120);
+    for _ in 0..ticks {
+        sim.step();
+    }
+
+    // Only creatures who *could* teach right now, by the same structural test
+    // `actions::is_legal` applies to the menu.
+    let reach = cfg.actions.social_reach.max(2);
+    let eligible: Vec<i64> = sim
+        .creatures
+        .iter()
+        .filter(|c| {
+            c.is_alive()
+                && c.life_stage != LifeStage::Infant
+                && !c.beliefs.is_empty()
+                && c.household_id.is_some()
+                && sim.creatures.iter().any(|p| {
+                    p.id != c.id
+                        && p.is_alive()
+                        && p.household_id == c.household_id
+                        && p.life_stage != LifeStage::Elder
+                        && c.x.abs_diff(p.x) <= reach
+                        && c.y.abs_diff(p.y) <= reach
+                })
+        })
+        .map(|c| c.id)
+        .collect();
+
+    println!("== §13.5: will a creature choose to teach? ==");
+    println!("model {}, warmed {ticks} ticks, {} alive, {} could teach right now\n",
+             cfg.llm.model, sim.alive(), eligible.len());
+    if eligible.is_empty() {
+        println!("nobody is in a position to teach — warm the world longer");
+        return;
+    }
+
+    let client = Client::new(cfg.llm.clone());
+    let sc = schema::response_schema(cfg.deliberation.model_estimates_horizon);
+    let (mut asked, mut offered, mut model_taught, mut t1_taught, mut unusable) = (0, 0, 0, 0, 0);
+    let mut reasons: Vec<String> = Vec::new();
+    let started = Instant::now();
+
+    for id in eligible.into_iter().take(calls) {
+        let Some((prompt, menu)) = sim.deliberation_for(id) else { continue };
+        // Confirm the menu really carries it, rather than assuming.
+        let has_teach = menu.options.iter().any(|o| {
+            o.goal.as_str() == "TEACH" || o.goal.as_str() == "SHARE_KNOWLEDGE"
+        });
+        if !has_teach {
+            continue;
+        }
+        offered += 1;
+        if let Some((g, _)) = sim.tier1_choice(id) {
+            if g == "TEACH" || g == "SHARE_KNOWLEDGE" {
+                t1_taught += 1;
+            }
+        }
+        let Ok(r) = client.chat(&prompt, &sc, Depth::Standard) else {
+            unusable += 1;
+            continue;
+        };
+        let Ok(v) = schema::validate(&r.raw, &menu, &cfg) else {
+            unusable += 1;
+            continue;
+        };
+        asked += 1;
+        if v.steps.iter().any(|s| {
+            let g = s.goal.as_str();
+            g == "TEACH" || g == "SHARE_KNOWLEDGE"
+        }) {
+            model_taught += 1;
+            if reasons.len() < 6 {
+                reasons.push(format!("  #{id}: \"{}\"", v.rationale));
+            }
+        }
+    }
+
+    println!("teaching was on the menu for {offered} of them");
+    println!("{asked} answers came back usable ({unusable} not)\n");
+    println!("-- who chose to pass knowledge on --");
+    println!("  Tier 1   {t1_taught}/{offered}  ({:.0}%)", pct(t1_taught, offered.max(1)));
+    println!("  model    {model_taught}/{asked}  ({:.0}%)", pct(model_taught, asked.max(1)));
+    println!("\n  in {:.0}s", started.elapsed().as_secs_f64());
+    if !reasons.is_empty() {
+        println!("\n-- why the model said it would --");
+        for r in &reasons {
+            println!("{r}");
+        }
+    }
+}
+
 fn s6_report(seed: u64, ticks: i64, calls: usize) {
     use life_zone_lib::ai::ollama::{Client, Depth};
     use life_zone_lib::ai::schema;
