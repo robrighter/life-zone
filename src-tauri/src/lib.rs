@@ -366,14 +366,15 @@ fn bootstrap_world(conn: &Connection) -> Result<WorldRow> {
     }
 
     let mut config = WorldConfig::default();
-    // M2 has no reproduction — that is M4 — so a world seeded with founders
-    // alone dwindles to nothing within a few hundred ticks and there is
-    // nothing to watch. A new world therefore starts as a settlement with its
-    // census held by the measurement fixture, which the UI labels plainly so a
-    // held run is never mistaken for a self-sustaining one. Both knobs are in
-    // `worlds.config_json` and can be turned off.
+    // A settlement rather than eight founders, because eight people on a
+    // 512-tile map is not much to look at — but the census is *not* held any
+    // more. It was, back when there was no reproduction and a world dwindled
+    // to nothing within a few hundred ticks; holding it now would hide the
+    // thing the game is about, since every settler arrives as its own
+    // generation-1 founder and a held run shows a busy map with no lineage in
+    // it. Since M6 the population sustains itself: measured across three seeds
+    // at 6,000 ticks, generation 17 to 28 with no fixture at all.
     config.bench.initial_creatures = Some(300);
-    config.bench.maintain_population = Some(300);
 
     let world = repo::create_world(conn, "Ashfen", 44127, &config)?;
     Ok(world)
@@ -583,15 +584,24 @@ mod tests {
     }
 
     #[test]
-    fn a_new_world_starts_as_a_settlement_and_says_so() {
-        // M2 has no reproduction, so founders alone would leave nothing to
-        // watch. The fixture that fills the gap must be recorded in the world's
-        // own config rather than hidden in the binary.
+    fn a_new_world_starts_as_a_settlement_and_holds_nothing_up() {
+        // A settlement rather than eight founders, because eight people on a
+        // 512-tile map is nothing to look at — and whatever the world is
+        // seeded with has to be recorded in its own config rather than hidden
+        // in the binary.
+        //
+        // The census fixture is gone. It existed when there was no
+        // reproduction; keeping it now would hide the thing the game is about,
+        // because every settler arrives as its own generation-1 founder and a
+        // held run shows a busy map with no lineage in it.
         let conn = db();
         let w = bootstrap_world(&conn).unwrap();
         let cfg = repo::load_world_config(&conn, w.id).unwrap().unwrap();
 
         assert_eq!(cfg.bench.initial_creatures, Some(300));
-        assert_eq!(cfg.bench.maintain_population, Some(300));
+        assert_eq!(
+            cfg.bench.maintain_population, None,
+            "a world that tops itself up cannot show a lineage"
+        );
     }
 }

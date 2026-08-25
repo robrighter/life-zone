@@ -567,7 +567,13 @@ impl SimThread {
 
     fn regenerate(&mut self, seed: i64, creatures: u32) {
         tracing::info!(seed, creatures, "regenerating world");
-        let cfg = self.sim.cfg.clone();
+        // Take the *current* defaults, not the config this world was created
+        // with. Regenerating is "start over", and a world made before M6's
+        // balance pass carries dials — soil at 0.012, a 20-grain reserve, a
+        // 168-tick infancy — under which no lineage reaches generation 2. A
+        // player who regenerates to get a fresh start and silently keeps the
+        // old economy has no way to tell why nothing is happening.
+        let cfg = crate::config::WorldConfig::default();
         let out = crate::sim::worldgen::generate(seed as u64, &cfg);
 
         let world_id = self.sim.world_id;
@@ -584,8 +590,12 @@ impl SimThread {
         }
         let _ = repo::save_world(&mut self.conn, world_id, &out.world);
         let _ = self.conn.execute(
-            "UPDATE worlds SET seed = ?2, current_tick = 0 WHERE id = ?1",
-            rusqlite::params![world_id, seed],
+            "UPDATE worlds SET seed = ?2, current_tick = 0, config_json = ?3 WHERE id = ?1",
+            rusqlite::params![
+                world_id,
+                seed,
+                serde_json::to_string(&cfg).unwrap_or_default()
+            ],
         );
 
         let mut sim = Sim::new(world_id, out.world, cfg, seed as u64);
