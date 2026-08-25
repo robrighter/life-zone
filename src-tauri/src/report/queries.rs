@@ -151,6 +151,15 @@ pub fn infant_mortality(conn: &Connection, world: i64, generation: Option<i64>) 
 
 /// S7, as one number: what share of the beliefs currently in circulation came
 /// from somebody who is no longer alive to be asked.
+/// S7: the share of beliefs **in circulation** whose discoverer is dead.
+///
+/// "In circulation" means held by somebody alive, which is the join this
+/// originally lacked. A dead creature's belief rows stay in the table — that is
+/// deliberate, and it is what lets a belief be traced to its origin long after
+/// the finder is gone — but they are not in circulation, and counting them puts
+/// the entire dead population into the denominator. On a run that ends empty
+/// the measure then approaches zero by construction no matter how well
+/// knowledge actually travelled while there was anyone left to carry it.
 pub fn beliefs_from_the_dead(conn: &Connection, world: i64) -> Result<f64> {
     let (total, inherited): (i64, i64) = conn.query_row(
         "SELECT COUNT(*),
@@ -160,7 +169,9 @@ pub fn beliefs_from_the_dead(conn: &Connection, world: i64) -> Result<f64> {
                                        WHERE o.id = b.origin_creature_id
                                          AND o.death_tick IS NOT NULL)
                          THEN 1 ELSE 0 END)
-         FROM beliefs b WHERE b.world_id = ?1",
+         FROM beliefs b
+         JOIN creatures h ON h.id = b.creature_id AND h.death_tick IS NULL
+        WHERE b.world_id = ?1",
         [world],
         |r| Ok((r.get(0).unwrap_or(0), r.get(1).unwrap_or(0))),
     )?;

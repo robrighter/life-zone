@@ -1014,6 +1014,40 @@ fn run_report(seed: u64, creatures: u32, ticks: i64) {
     println!("  courtships accepted {pairings}, refused {rejections}  ({:.0}% refused)",
              pct(rejections as usize, (pairings + rejections) as usize));
     println!("  conceptions {conceptions}, births {births}");
+
+    // How often teaching is even *possible*, as distinct from how often it is
+    // chosen. Tier 1 is deliberately myopic about teaching (§13.5 and the note
+    // in `policy::social_run`), so the model is meant to be the one that does
+    // it — but that only matters if the opportunity exists. If this is near
+    // zero, no tier can teach and the culture layer is inert whatever the
+    // prompt says.
+    {
+        use life_zone_lib::sim::creature::LifeStage;
+        let reach = cfg.actions.social_reach.max(2);
+        let (mut eligible, mut with_pupil) = (0u64, 0u64);
+        for c in sim.creatures.iter().filter(|c| c.is_alive()) {
+            if c.life_stage == LifeStage::Infant || c.beliefs.is_empty() || c.household_id.is_none()
+            {
+                continue;
+            }
+            eligible += 1;
+            let has_pupil = sim.creatures.iter().any(|p| {
+                p.id != c.id
+                    && p.is_alive()
+                    && p.household_id == c.household_id
+                    && p.life_stage != LifeStage::Elder
+                    && c.x.abs_diff(p.x) <= reach
+                    && c.y.abs_diff(p.y) <= reach
+            });
+            if has_pupil {
+                with_pupil += 1;
+            }
+        }
+        println!(
+            "  teaching: {eligible} could teach, {with_pupil} have a pupil in reach              ({:.1}% of the living)",
+            pct(with_pupil as usize, sim.alive().max(1))
+        );
+    }
     if settlers > 0 {
         println!("  settlers admitted by the fixture {settlers} (not births)");
     }
