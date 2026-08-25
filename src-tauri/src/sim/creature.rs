@@ -541,13 +541,20 @@ mod tests {
     }
 
     #[test]
-    fn life_stage_boundaries_match_the_prd_table() {
+    fn life_stage_boundaries_follow_the_configured_dials() {
+        // Read from the config rather than pinned to 168/588. Those were the
+        // §4.1 table's numbers and M6's balance pass moved them; a test that
+        // restates the constants only ever measures whether somebody
+        // remembered to edit it in two places.
         let l = &cfg().lifespan;
+        let (i, e) = (l.infant_until_tick as i64, l.elder_from_tick as i64);
+        assert!(i > 0 && i < e && e < l.baseline_ticks as i64, "the stages must be ordered");
+
         assert_eq!(LifeStage::of(0, l), LifeStage::Infant);
-        assert_eq!(LifeStage::of(167, l), LifeStage::Infant);
-        assert_eq!(LifeStage::of(168, l), LifeStage::Adult, "adulthood starts at 168");
-        assert_eq!(LifeStage::of(587, l), LifeStage::Adult);
-        assert_eq!(LifeStage::of(588, l), LifeStage::Elder, "elder from 588");
+        assert_eq!(LifeStage::of(i - 1, l), LifeStage::Infant);
+        assert_eq!(LifeStage::of(i, l), LifeStage::Adult, "adulthood starts the tick infancy ends");
+        assert_eq!(LifeStage::of(e - 1, l), LifeStage::Adult);
+        assert_eq!(LifeStage::of(e, l), LifeStage::Elder, "elder the tick adulthood ends");
     }
 
     #[test]

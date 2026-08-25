@@ -332,12 +332,23 @@ mod tests {
         let c = cfg();
         let w = |age: i64| age_weight(&at_age(age), age, &c);
 
-        assert!(w(50) < 0.1, "infants effectively never deliberate");
-        assert!(w(180) < w(230), "the ramp rises through emerging adulthood");
-        assert!((w(300) - c.deliberation.age_weight_prime).abs() < 0.01, "prime is the peak");
-        assert!(w(500) < w(300), "mature adults re-think less often");
-        assert!(w(620) < w(500), "and elders less again");
-        assert!(w(620) > 0.2, "but not to nothing — an old creature still thinks");
+        // Every age is relative to the dials, because `age_weight` places its
+        // bands relative to them too: emerging ends at infancy+52 and prime at
+        // infancy+212. The old fixed ages of 180 and 230 both landed inside
+        // prime once M6 moved infancy to 48, so the ramp assertion was
+        // comparing a value against itself.
+        let inf = c.lifespan.infant_until_tick as i64;
+        let elder = c.lifespan.elder_from_tick as i64;
+
+        assert!(w(inf / 2) < 0.1, "infants effectively never deliberate");
+        assert!(w(inf + 10) < w(inf + 40), "the ramp rises through emerging adulthood");
+        assert!(
+            (w(inf + 150) - c.deliberation.age_weight_prime).abs() < 0.01,
+            "prime is the peak"
+        );
+        assert!(w(elder - 40) < w(inf + 150), "mature adults re-think less often");
+        assert!(w(elder + 30) < w(elder - 40), "and elders less again");
+        assert!(w(elder + 30) > 0.2, "but not to nothing — an old creature still thinks");
     }
 
     #[test]
@@ -345,11 +356,18 @@ mod tests {
         // §13.1 names infant duration as the first balance dial. If the
         // deliberation curve does not move with it, turning it leaves the
         // scheduler describing a creature that no longer exists.
+        // Both ends stated explicitly rather than one of them borrowed from
+        // the default, which silently inverted the comparison when M6 moved
+        // infancy below the literal this test had picked.
         let mut short = cfg();
         short.lifespan.infant_until_tick = 96;
-        let c = at_age(120);
+        let mut long = cfg();
+        long.lifespan.infant_until_tick = 192;
+
+        let age = 120; // an adult under `short`, still an infant under `long`
+        let c = at_age(age);
         assert!(
-            age_weight(&c, 120, &short) > age_weight(&c, 120, &cfg()),
+            age_weight(&c, age, &short) > age_weight(&c, age, &long),
             "a creature that is already an adult should be thinking like one"
         );
     }

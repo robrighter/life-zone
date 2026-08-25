@@ -80,7 +80,12 @@ impl Default for ResourceConfig {
             // there; what should kill a creature is failing to reach it, being
             // in the wrong place at nightfall, or acting on a belief that has
             // gone stale. Scarcity bites through distribution, not arithmetic.
-            forage_density: 0.020, wood_density: 0.016, soil_density: 0.012,
+            // Soil at 0.012 put farmable ground on 1.9% of the map, and with
+            // spoilage making grain the only food that reaches the reproduction
+            // reserve (§4.4), that is the supply side of the wheat gate. No
+            // combination of the reproduction dials reached generation 5 while
+            // soil stayed this scarce; none of them failed to once it did not.
+            forage_density: 0.020, wood_density: 0.016, soil_density: 0.06,
             sheep_flocks: 14,
             forage_regen_per_tick: 0.12,
             // Wood is in continuous demand once it is fuel as well as timber:
@@ -141,7 +146,13 @@ impl Default for LifespanConfig {
         Self {
             baseline_ticks: 672,   // 4 weeks (§4.1)
             ceiling_ticks: 840,    // 5 weeks, well-fed and sheltered
-            infant_until_tick: 168,
+            // §13.1 asked "is a 4-week lifespan with a 1-week infancy
+            // survivable at all?" Measured answer at M6: not remotely. A
+            // quarter of life as a dependent leaves a 420-tick adult window
+            // against a ~300-tick setup to a first child, so a couple gets one
+            // child if it is lucky and the population halves every generation.
+            // At 48 the same seeds reach generation 14-17.
+            infant_until_tick: 48,
             elder_from_tick: 588,
             malnutrition_aging_multiplier: 2.0,
             unsheltered_night_penalty_ticks: 10.0,
@@ -168,7 +179,14 @@ pub struct ReproductionConfig {
 impl Default for ReproductionConfig {
     fn default() -> Self {
         Self {
-            store_reserve: 20.0, gestation_ticks: 48, health_floor: 50.0,
+            // The reserve was the single biggest gate in the simulation:
+            // 80.2% of every blocked conception was "store below the reserve",
+            // against 10.4% for age and 9.4% for health. Households held about
+            // one grain each against a 20-grain bar, because grain is harvested
+            // and eaten in the same breath — 2,314 harvested, 2,244 eaten.
+            store_reserve: 6.0,
+            gestation_ticks: 24,
+            health_floor: 50.0,
             childbirth_mortality: 0.03, mutation_sigma: 0.08,
             courtship_offer_ticks: 12,
             // Two in-game days. Not a PRD number — it exists only to stop a
@@ -176,7 +194,7 @@ impl Default for ReproductionConfig {
             // first crosses the reserve. At 96 it was blocking a fifth of all
             // otherwise-eligible conception ticks, which is doing rather more
             // than that.
-            birth_spacing_ticks: 48,
+            birth_spacing_ticks: 18,
             birth_store_cost: 6.0,
         }
     }
@@ -429,7 +447,7 @@ impl Default for ActionConfig {
             carry_capacity: 26.0,
             gather_forage_per_tick: 1.6,
             chop_wood_per_tick: 1.4,
-            harvest_wheat_per_tick: 2.2,
+            harvest_wheat_per_tick: 7.0,
             night_forage_scale: 0.45,
             eat_portion: 2.0,
             drink_restore: 55.0,
@@ -440,7 +458,11 @@ impl Default for ActionConfig {
             // household, which is the precondition for the store, which is the
             // precondition for a child. Measured at 150 creatures over 4,000
             // ticks: 12 wood gave 18 households, 8 gave 34, 6 gave 51.
-            shelter_wood_cost: 8.0,
+            // Lowered again at M6, but the cost was never the real obstacle:
+            // paired couples carried a mean of 1.0 wood whether a shelter cost
+            // 8 or 5, because a chop trip completes only a third of the time
+            // and the night's fire eats what does get home.
+            shelter_wood_cost: 5.0,
             shelter_build_ticks: 8,
             shelter_capacity: 6,
             shelter_warmth: 9.0,
@@ -586,7 +608,11 @@ mod tests {
         let back: WorldConfig = serde_json::from_str(r#"{"map":{"width":256}}"#).unwrap();
         assert_eq!(back.map.width, 256);
         assert_eq!(back.map.height, 512); // defaulted
-        assert_eq!(back.reproduction.store_reserve, 20.0);
+        assert_eq!(
+            back.reproduction.store_reserve,
+            WorldConfig::default().reproduction.store_reserve,
+            "an omitted field takes whatever the default currently is"
+        );
     }
 
     #[test]

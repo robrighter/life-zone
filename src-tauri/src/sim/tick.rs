@@ -3023,7 +3023,12 @@ mod tests {
         // §4.4 and §4.8 together: only grain keeps, and only a household above
         // the reserve may have a child. A couple with everything else in place
         // and nothing put by is the case this whole economy is built around.
-        let cfg = small_cfg();
+        // The reserve is set here rather than taken from the default. The
+        // rule under test is "a household below the bar may not have a child",
+        // and with the bar at 6 a fed couple banks past it inside sixty ticks —
+        // so the old version was passing on the size of the dial, not the rule.
+        let mut cfg = small_cfg();
+        cfg.reproduction.store_reserve = 500.0;
         let world = worldgen::generate(44127, &cfg).world;
         let mut sim = Sim::new(1, world, cfg.clone(), 44127);
         let (a, b, _) = couple_at_home(&mut sim, 0.0);
@@ -3079,7 +3084,12 @@ mod tests {
     fn an_infant_with_no_guardian_and_nobody_to_feed_it_dies() {
         // The dependency window §4.7 calls deliberately harsh. An infant cannot
         // gather; without somebody feeding it, it starves.
-        let cfg = small_cfg();
+        // Infancy is held long enough for the subject to still be an infant
+        // when it dies. At the tuned 48 ticks it grows up first and then dies
+        // of exposure as an adult, which is a true thing about the world and
+        // not the thing this test is about.
+        let mut cfg = small_cfg();
+        cfg.lifespan.infant_until_tick = 400;
         let world = worldgen::generate(44127, &cfg).world;
         let mut sim = Sim::new(1, world, cfg, 44127);
         sim.spawn_at(20, 20, Sex::Female, 0, 2);

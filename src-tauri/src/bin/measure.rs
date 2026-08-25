@@ -592,6 +592,18 @@ fn run_report(seed: u64, creatures: u32, ticks: i64) {
     if let Some(v) = dial("LZ_ELDER") {
         cfg.lifespan.elder_from_tick = v as u32;
     }
+    // §13.1 lists three dials and lifespan is not among them, because the
+    // 4-week life is a design premise rather than a knob. It becomes a knob the
+    // moment the other three are exhausted and still cannot reach generation 5.
+    if let Some(v) = dial("LZ_LIFESPAN") {
+        cfg.lifespan.baseline_ticks = v as u32;
+    }
+    // S4: "turning off wheat farming collapses lineage depth across 3 seeded
+    // runs". §11 says the toggles exist precisely to run the same seed with one
+    // mechanic disabled, which is how you find out whether it does anything.
+    if let Some(v) = dial("LZ_WHEAT") {
+        cfg.features.wheat = v != 0.0;
+    }
     if let Some(v) = dial("LZ_SHELTER_COST") {
         cfg.actions.shelter_wood_cost = v;
     }
