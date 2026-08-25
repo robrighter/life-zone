@@ -18,6 +18,21 @@ const SOIL_WATER_REACH: u32 = 6;
 /// many tiles of travel.
 const VIABLE_WATER_DIST: u32 = 22;
 const VIABLE_FORAGE_DIST: u32 = 26;
+/// And fuel. A start out of reach of wood is not a survivable start.
+///
+/// Founder placement scored water, forage and soil and ignored fuel entirely,
+/// which is how seed 31337 put its founders in a corner whose nearest wood was
+/// 53 tiles away. Measured over 1,200 ticks at 500 creatures on that seed:
+/// **zero** wood chopped, zero fires, zero shelters, zero households, and
+/// 69.6% of all deaths by exposure against 17–18% on seeds where wood happened
+/// to be close. The world itself was not poor — it had more wood, forage,
+/// wheat and soil than the seeds that worked. Only the starting position was
+/// fatal, and nothing checked it.
+///
+/// Wood is fetched less often than food, so this is looser than forage — but
+/// it has to be inside the tether `policy::explore_reach` allows, or the
+/// creatures can never learn the wood is there in the first place.
+const VIABLE_WOOD_DIST: u32 = 30;
 /// Distinct fresh-water bodies a world must have to be worth playing (§8.2).
 const MIN_WATER_BODIES: usize = 3;
 const MIN_WATER_BODY_TILES: usize = 40;
@@ -229,30 +244,8 @@ fn place_nodes(world: &mut World, config: &WorldConfig, rng: &mut ChaCha8Rng) {
 /// founders scattered across a 512-tile map would never meet.
 fn place_founders(world: &mut World, config: &WorldConfig, rng: &mut ChaCha8Rng) {
     let water = distance_field(world, |t| t.is_fresh_water());
-    let forage: Vec<u32> = {
-        let mut f = vec![u32::MAX; world.tiles.len()];
-        let mut q = VecDeque::new();
-        for n in &world.nodes {
-            if n.kind == NodeKind::Forage {
-                let i = world.idx(n.x, n.y);
-                f[i] = 0;
-                q.push_back((n.x, n.y));
-            }
-        }
-        while let Some((x, y)) = q.pop_front() {
-            let d = f[world.idx(x, y)];
-            for (dx, dy) in [(1i64, 0i64), (-1, 0), (0, 1), (0, -1)] {
-                let (nx, ny) = (x as i64 + dx, y as i64 + dy);
-                if !world.in_bounds(nx, ny) { continue; }
-                let (nx, ny) = (nx as u32, ny as u32);
-                let ni = world.idx(nx, ny);
-                if !world.tiles[ni].passable() || f[ni] != u32::MAX { continue; }
-                f[ni] = d + 1;
-                q.push_back((nx, ny));
-            }
-        }
-        f
-    };
+    let forage = node_distance_field(world, NodeKind::Forage);
+    let wood = node_distance_field(world, NodeKind::Wood);
     let soil = distance_field(world, |t| t == Terrain::Soil);
 
     let mut best: Option<(u32, u32, u32)> = None; // (score, x, y) - lower is better
@@ -262,12 +255,19 @@ fn place_founders(world: &mut World, config: &WorldConfig, rng: &mut ChaCha8Rng)
             if !world.tiles[i].passable() || world.tiles[i].is_water() {
                 continue;
             }
-            let (dw, df, ds) = (water[i], forage[i], soil[i]);
-            if dw > VIABLE_WATER_DIST || df > VIABLE_FORAGE_DIST {
+            let (dw, df, dwd, ds) = (water[i], forage[i], wood[i], soil[i]);
+            if dw > VIABLE_WATER_DIST
+                || df > VIABLE_FORAGE_DIST
+                || dwd > VIABLE_WOOD_DIST
+            {
                 continue;
             }
-            // Water matters most, then forage, then soil within reach.
-            let score = dw * 3 + df * 2 + ds.min(60);
+            // Water matters most, then the two things that kill you next —
+            // food and cold — then soil within reach. Fuel is weighted with
+            // forage rather than below it: exposure is a top-three cause of
+            // death on every seed measured, and the hearth is what a household
+            // forms around (§4.6).
+            let score = dw * 3 + df * 2 + dwd * 2 + ds.min(60);
             if best.is_none_or(|(b, _, _)| score < b) {
                 best = Some((score, x, y));
             }
@@ -298,6 +298,40 @@ fn place_founders(world: &mut World, config: &WorldConfig, rng: &mut ChaCha8Rng)
     }
 }
 
+/// Walking distance from every passable tile to the nearest node of a kind.
+///
+/// Four-connected on purpose: it is a coarse reachability measure for placement
+/// and rejection, not a path, and treating diagonals as free would flatter
+/// starts that are separated from their fuel by a coastline.
+fn node_distance_field(world: &World, kind: NodeKind) -> Vec<u32> {
+    let mut f = vec![u32::MAX; world.tiles.len()];
+    let mut q = VecDeque::new();
+    for n in &world.nodes {
+        if n.kind == kind {
+            let i = world.idx(n.x, n.y);
+            f[i] = 0;
+            q.push_back((n.x, n.y));
+        }
+    }
+    while let Some((x, y)) = q.pop_front() {
+        let d = f[world.idx(x, y)];
+        for (dx, dy) in [(1i64, 0i64), (-1, 0), (0, 1), (0, -1)] {
+            let (nx, ny) = (x as i64 + dx, y as i64 + dy);
+            if !world.in_bounds(nx, ny) {
+                continue;
+            }
+            let (nx, ny) = (nx as u32, ny as u32);
+            let ni = world.idx(nx, ny);
+            if !world.tiles[ni].passable() || f[ni] != u32::MAX {
+                continue;
+            }
+            f[ni] = d + 1;
+            q.push_back((nx, ny));
+        }
+    }
+    f
+}
+
 /// Reject worlds the founders cannot survive from tick 0 (§8).
 fn check_viability(world: &World) -> Result<(), String> {
     if world.founders.is_empty() {
@@ -322,10 +356,17 @@ fn check_viability(world: &World) -> Result<(), String> {
         return Err("no farmable soil".into());
     }
 
+    let wood = node_distance_field(world, NodeKind::Wood);
     for f in &world.founders {
         let i = world.idx(f.x, f.y);
         if water[i] > VIABLE_WATER_DIST {
             return Err(format!("founder at {},{} is {} tiles from water", f.x, f.y, water[i]));
+        }
+        if wood[i] > VIABLE_WOOD_DIST {
+            return Err(format!(
+                "founder at {},{} is {} tiles from the nearest wood",
+                f.x, f.y, wood[i]
+            ));
         }
     }
     Ok(())
@@ -374,6 +415,36 @@ mod tests {
         c.map.width = size;
         c.map.height = size;
         c
+    }
+
+    /// A start must be able to keep warm, not merely fed and watered.
+    ///
+    /// Seed 31337 is the case that motivated this: founder placement scored
+    /// water, forage and soil and ignored fuel, so it chose a corner whose
+    /// nearest wood was 53 tiles away. Over 1,200 ticks at 500 creatures that
+    /// world chopped no wood, lit no fire, built no shelter, founded no
+    /// household, and lost 69.6% of its population to exposure — on a map that
+    /// held *more* wood than the seeds that worked.
+    ///
+    /// Several seeds, because the failure was invisible on the two that
+    /// happened to start near a forest. One seed is not a test of placement.
+    #[test]
+    fn founders_start_within_reach_of_fuel() {
+        for seed in [44127u64, 90211, 31337, 7, 99991] {
+            let w = generate(seed, &cfg(256)).world;
+            let wood = node_distance_field(&w, NodeKind::Wood);
+            assert!(!w.founders.is_empty(), "seed {seed} placed no founders");
+            for f in &w.founders {
+                let d = wood[w.idx(f.x, f.y)];
+                assert!(
+                    d <= VIABLE_WOOD_DIST,
+                    "seed {seed}: founder at {},{} is {d} tiles from wood, and a \
+                     start that cannot reach fuel freezes",
+                    f.x,
+                    f.y
+                );
+            }
+        }
     }
 
     /// Invariant 7 and half of M1's exit criterion.

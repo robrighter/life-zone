@@ -513,13 +513,13 @@ function Knowledge() {
     <>
       <Figure
         title="What the community collectively knows"
-        note="Sampled, so gaps in the line are gaps in sampling. Expect a ragged expansion that stalls or collapses when a knowledgeable lineage dies out."
+        note="Distinct places somebody alive holds a belief about — water, forage, wood, soil. Not a share of the map: beliefs never record plain terrain, so there is no honest denominator. Sampled, so gaps in the line are gaps in sampling."
         rows={cov ?? []}
-        series={[{ key: "known_tiles", label: "tiles known", value: (d: R.CoveragePoint) => d.known_tiles }]}
+        series={[{ key: "known_sites", label: "sites known", value: (d: R.CoveragePoint) => d.known_sites }]}
         columns={[
           { key: "tick", label: "tick", get: (d: R.CoveragePoint) => d.tick },
-          { key: "tiles", label: "tiles known", get: (d: R.CoveragePoint) => d.known_tiles },
-          { key: "share", label: "share of world", get: (d: R.CoveragePoint) => `${(d.share_of_world * 100).toFixed(2)}%` },
+          { key: "sites", label: "sites known", get: (d: R.CoveragePoint) => d.known_sites },
+          { key: "pop", label: "population", get: (d: R.CoveragePoint) => d.population },
           { key: "per", label: "per creature", get: (d: R.CoveragePoint) => d.per_capita.toFixed(1) },
         ]}
       >
@@ -528,7 +528,7 @@ function Knowledge() {
           x={(d: R.CoveragePoint) => d.tick}
           xLabel="tick"
           height={200}
-          series={[{ key: "known_tiles", label: "tiles known", value: (d: R.CoveragePoint) => d.known_tiles }]}
+          series={[{ key: "known_sites", label: "sites known", value: (d: R.CoveragePoint) => d.known_sites }]}
         />
       </Figure>
 
@@ -536,14 +536,14 @@ function Knowledge() {
         title="Knowledge per creature"
         note="Separate from the chart above rather than a second axis on it. A rising total with a falling ratio is a community coasting on what a few well-travelled elders remember."
         rows={cov ?? []}
-        series={[{ key: "per_capita", label: "tiles per creature", value: (d: R.CoveragePoint) => d.per_capita }]}
+        series={[{ key: "per_capita", label: "sites per creature", value: (d: R.CoveragePoint) => d.per_capita }]}
       >
         <LineChart
           rows={cov ?? []}
           x={(d: R.CoveragePoint) => d.tick}
           xLabel="tick"
           height={170}
-          series={[{ key: "per_capita", label: "tiles per creature", value: (d: R.CoveragePoint) => d.per_capita }]}
+          series={[{ key: "per_capita", label: "sites per creature", value: (d: R.CoveragePoint) => d.per_capita }]}
         />
       </Figure>
 

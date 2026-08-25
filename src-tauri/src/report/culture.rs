@@ -43,26 +43,38 @@ depth_of AS (
 #[derive(Debug, Clone, Serialize)]
 pub struct CoveragePoint {
     pub tick: i64,
-    pub known_tiles: i64,
-    pub share_of_world: f64,
+    /// Distinct places the living population collectively holds a belief about.
+    pub known_sites: i64,
     pub population: i64,
     /// Tiles known per living creature. A rising total with a falling ratio is
     /// a community coasting on what a few well-travelled elders remember.
     pub per_capita: f64,
 }
 
-/// Collective known-map coverage over time (§10).
+/// What the community collectively knows, over time (§10).
 ///
 /// > "Expect a ragged expansion that stalls or collapses when a knowledgeable
 /// > lineage dies out."
+///
+/// **A count of sites, not a share of the map.** §10 asks for "what fraction of
+/// the world the community collectively knows", and this reported exactly that
+/// — distinct belief tiles over the map's 262,144 — until the number was read
+/// on a real run: 0.2%, which invites the conclusion that exploration is
+/// broken. It is not what it looks like. Beliefs record *places worth
+/// remembering* — water, forage, wood, soil — and never plain terrain, so the
+/// denominator was measuring something the numerator could never count. On the
+/// same run the population knew roughly half the resource sites within reach.
+///
+/// There is no honest denominator available: the numerator mixes resource
+/// nodes with water tiles, and the two are counted differently. A raw count
+/// with a truthful label beats a percentage against the wrong base, so the
+/// share is gone and `per_capita` carries the comparison instead.
 ///
 /// Sampled, not continuous: `tick_stats.known_tiles` is NULL on unsampled ticks
 /// (see migration 004), and those rows are dropped here rather than drawn as
 /// zero — a gap in sampling is not a collapse in knowledge, and plotting it as
 /// one would manufacture exactly the signal this chart exists to detect.
 pub fn map_coverage(conn: &Connection, world: i64) -> Result<Vec<CoveragePoint>> {
-    let tiles = super::queries::world_tiles(conn, world);
-
     let mut stmt = conn.prepare(
         "SELECT tick, known_tiles, population
            FROM tick_stats
@@ -74,8 +86,7 @@ pub fn map_coverage(conn: &Connection, world: i64) -> Result<Vec<CoveragePoint>>
         let pop: i64 = r.get(2)?;
         Ok(CoveragePoint {
             tick: r.get(0)?,
-            known_tiles: known,
-            share_of_world: known as f64 / tiles,
+            known_sites: known,
             population: pop,
             per_capita: if pop > 0 { known as f64 / pop as f64 } else { 0.0 },
         })
@@ -1010,16 +1021,12 @@ mod tests {
         let cov = map_coverage(&conn, w).unwrap();
         assert!(!cov.is_empty(), "migration 004 should be recording known_tiles");
         assert!(
-            cov.iter().all(|p| p.known_tiles > 0),
+            cov.iter().all(|p| p.known_sites > 0),
             "an unsampled tick must be absent, not drawn as zero — that would \
              invent the collapse this chart exists to detect"
         );
-        assert!(
-            cov.iter().all(|p| p.share_of_world > 0.0 && p.share_of_world <= 1.0),
-            "coverage is a share of the map and cannot exceed it"
-        );
-        let first = cov.first().unwrap().known_tiles;
-        let peak = cov.iter().map(|p| p.known_tiles).max().unwrap();
+        let first = cov.first().unwrap().known_sites;
+        let peak = cov.iter().map(|p| p.known_sites).max().unwrap();
         assert!(peak > first, "600 ticks of exploration should widen what is known");
     }
 

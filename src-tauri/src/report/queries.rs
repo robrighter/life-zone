@@ -38,20 +38,6 @@ pub(crate) fn payload_num(key: &str) -> String {
     )
 }
 
-/// The map's tile count, which lives in `worlds.config_json` and not in a
-/// column of its own.
-pub(crate) fn world_tiles(conn: &Connection, world: i64) -> f64 {
-    conn.query_row(
-        "SELECT json_extract(config_json, '$.map.width')
-              * json_extract(config_json, '$.map.height')
-           FROM worlds WHERE id = ?1",
-        [world],
-        |r| r.get::<_, i64>(0),
-    )
-    .unwrap_or(1)
-    .max(1) as f64
-}
-
 /// The four numbers at the top of the reporting view.
 #[derive(Debug, Clone, Serialize, Default)]
 pub struct Headline {

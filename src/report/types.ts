@@ -61,8 +61,7 @@ export interface WealthRow {
 }
 
 export interface CoveragePoint {
-  tick: number; known_tiles: number; share_of_world: number;
-  population: number; per_capita: number;
+  tick: number; known_sites: number; population: number; per_capita: number;
 }
 export interface HalfLifeRow {
   kind: string; median_ticks: number; p90_ticks: number;
