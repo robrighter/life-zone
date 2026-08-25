@@ -60,11 +60,27 @@ impl Depth {
         matches!(self, Depth::Deep)
     }
 
+    /// Response token budget.
+    ///
+    /// Raised roughly 2.5x at M6 after measuring that the old budgets were the
+    /// main cause of unusable answers rather than the models being incapable.
+    /// qwen3 writes a short preamble before its JSON even with `think` off, and
+    /// a budget that runs out mid-object arrives as NO_JSON_IN_RESPONSE —
+    /// indistinguishable, from the log, from a model that simply failed.
+    ///
+    /// Measured on qwen3:4b, eight calls each:
+    ///
+    ///   num_predict 160    17% usable   mean 8,811ms
+    ///   num_predict 512   100% usable   mean 7,613ms
+    ///
+    /// Note the latency went *down*. A truncated call spends its entire budget
+    /// and returns nothing, so a budget too small to finish is the most
+    /// expensive setting available — it pays full price for a fallback.
     fn num_predict(self) -> u32 {
         match self {
-            Depth::Shallow => 96,
-            Depth::Standard => 160,
-            Depth::Deep => 384,
+            Depth::Shallow => 256,
+            Depth::Standard => 384,
+            Depth::Deep => 768,
         }
     }
 }
@@ -180,7 +196,7 @@ impl Client {
             "think": depth.thinking(),
             "options": {
                 "temperature": self.cfg.temperature,
-                "num_predict": depth.num_predict(),
+                "num_predict": self.cfg.num_predict_override.unwrap_or_else(|| depth.num_predict()),
                 "num_ctx": self.cfg.num_ctx,
             }
         });
@@ -210,13 +226,24 @@ impl Client {
             .into_json()
             .map_err(|e| CallError::BadResponse(e.to_string()))?;
 
-        // Ollama does not report cache hits directly, but a prompt evaluation
-        // that took essentially no time is one that did not happen.
-        let cached_tokens = if parsed.prompt_eval_duration < 1_000_000 {
-            parsed.prompt_eval_count
-        } else {
-            0
-        };
+        // Ollama does not report cache hits directly, and it does *not* reduce
+        // `prompt_eval_count` when it reuses a prefix — the count is the whole
+        // prompt either way. The only signal is the rate.
+        //
+        // Measured on this hardware against qwen3:8b, same 1,105-token system
+        // prefix, different user message:
+        //
+        //   cold   1,105 tokens in 13.19s     84 tokens/sec
+        //   warm   1,108 tokens in  0.40s  2,770 tokens/sec
+        //
+        // The previous test asked for a prompt evaluation under one
+        // millisecond, which a cached prefix still misses by a factor of four
+        // hundred, so it reported 0% cache hits on every call ever made and the
+        // §5.7 prefix ordering looked inert when it was working.
+        const CACHED_TOKENS_PER_SEC: f64 = 500.0;
+        let secs = parsed.prompt_eval_duration as f64 / 1e9;
+        let rate = if secs > 0.0 { parsed.prompt_eval_count as f64 / secs } else { f64::MAX };
+        let cached_tokens = if rate > CACHED_TOKENS_PER_SEC { parsed.prompt_eval_count } else { 0 };
 
         Ok(Response {
             raw: parsed.message.content,

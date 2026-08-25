@@ -228,6 +228,13 @@ pub struct LlmConfig {
     /// and a short menu, not a transcript, and a large window costs real time
     /// to evaluate on CPU.
     pub num_ctx: u32,
+    /// Override the per-depth response token budget.
+    ///
+    /// `None` uses `Depth::num_predict`. A small model that emits a reasoning
+    /// block before its JSON can be truncated mid-object by the shallow budget
+    /// of 96, which arrives as NO_JSON_IN_RESPONSE and is indistinguishable
+    /// from the model simply failing to answer.
+    pub num_predict_override: Option<u32>,
 }
 impl Default for LlmConfig {
     fn default() -> Self {
@@ -241,6 +248,7 @@ impl Default for LlmConfig {
             static_prefix_ordering: true,
             retain_prompt_text_ticks: None,
             num_ctx: 4096,
+            num_predict_override: None,
         }
     }
 }

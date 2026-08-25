@@ -331,6 +331,17 @@ fn llm_report(seed: u64, ticks: i64, calls: usize) {
     let mut cfg = WorldConfig::default();
     cfg.map.width = 256;
     cfg.map.height = 256;
+    // §13.3: "how much does model choice matter? qwen3:8b is the target, but
+    // the budget maths changes substantially with a smaller model. A faster
+    // model that deliberates 3x more often may beat a smarter one that rarely
+    // gets the budget." That is a question about two numbers this harness
+    // already prints, so it only needed a way to change the model.
+    if let Ok(m) = std::env::var("LZ_MODEL") {
+        cfg.llm.model = m;
+    }
+    if let Some(v) = std::env::var("LZ_PREDICT").ok().and_then(|v| v.parse::<u32>().ok()) {
+        cfg.llm.num_predict_override = Some(v);
+    }
     let world = worldgen::generate(seed, &cfg).world;
     let mut sim = Sim::new(1, world, cfg.clone(), seed);
     sim.spawn_population(80);
