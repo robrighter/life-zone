@@ -1,0 +1,365 @@
+/* ==========================================================================
+   The reporting view (PRD §9.4, §10).
+
+   A separate full-window surface, not a side panel. It sits one step back from
+   the map's palette: the map is a live instrument and earns saturation, while
+   this is read for minutes at a time and should recede.
+
+   The chart rules in BUILD.md §7.4 show up here as three things — recessive
+   grid and axes, text in ink tokens and never in a series colour, and thin
+   marks. Nothing in this file assigns a colour to a series; that comes from the
+   registry in charts.tsx, keyed by the entity's own name.
+   ========================================================================== */
+
+.report {
+  display: grid;
+  grid-template-rows: 52px 1fr;
+  height: 100vh;
+  overflow: hidden;
+  background: var(--surface);
+}
+
+.report-bar {
+  display: flex;
+  align-items: center;
+  gap: 22px;
+  padding: 0 18px;
+  background: var(--panel);
+  border-bottom: 1px solid var(--line);
+}
+.report-bar h1 {
+  font-family: var(--display);
+  font-weight: 700;
+  font-size: 15px;
+  letter-spacing: -.02em;
+  margin: 0;
+}
+.report-bar nav { display: flex; gap: 2px; }
+.report-bar nav button,
+.report-actions button {
+  font: inherit;
+  font-size: 11px;
+  letter-spacing: .02em;
+  color: var(--ink-3);
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: var(--r);
+  padding: 5px 10px;
+  cursor: pointer;
+}
+.report-bar nav button:hover,
+.report-actions button:hover { color: var(--ink); background: var(--raised); }
+.report-bar nav button.on { color: var(--ink); background: var(--raised); }
+.report-actions {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.report-actions button { border-color: var(--line); }
+.exported {
+  font-family: var(--mono);
+  font-size: 10px;
+  color: var(--ink-3);
+  max-width: 380px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.report-body {
+  overflow-y: auto;
+  padding: 20px 22px 64px;
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+}
+.report-body h3 {
+  font-family: var(--display);
+  font-weight: 500;
+  font-size: 13px;
+  margin: 0;
+  letter-spacing: -.01em;
+}
+
+/* Two figures side by side, and one column once that stops being readable. */
+.split { display: grid; grid-template-columns: 1fr 1fr; gap: 18px; align-items: start; }
+@media (max-width: 1100px) { .split { grid-template-columns: 1fr; } }
+
+/* --------------------------------------------------------------- headline */
+
+.stats { display: flex; flex-wrap: wrap; gap: 10px; }
+.stats.wide .stat { flex: 1 1 190px; }
+.stat {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: var(--r);
+  padding: 11px 13px;
+  min-width: 150px;
+}
+.stat-label {
+  font-size: 9px;
+  letter-spacing: .09em;
+  text-transform: uppercase;
+  color: var(--ink-3);
+}
+.stat-value {
+  font-family: var(--mono);
+  font-variant-numeric: tabular-nums;
+  font-size: 19px;
+  font-weight: 500;
+  color: var(--ink);
+  margin-top: 3px;
+}
+.stat-sub { font-size: 10px; color: var(--ink-2); margin-top: 2px; }
+
+/* ----------------------------------------------------------------- figure */
+
+.fig {
+  margin: 0;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: var(--r);
+  padding: 13px 15px 11px;
+}
+.fig-head { display: flex; align-items: flex-start; gap: 14px; margin-bottom: 8px; }
+.fig-head > div { min-width: 0; }
+.fig-note {
+  font-size: 11px;
+  line-height: 1.45;
+  color: var(--ink-2);
+  margin: 4px 0 0;
+  max-width: 78ch;
+}
+.fig-toggle {
+  margin-left: auto;
+  flex: none;
+  font: inherit;
+  font-size: 10px;
+  letter-spacing: .04em;
+  color: var(--ink-3);
+  background: transparent;
+  border: 1px solid var(--line);
+  border-radius: var(--r);
+  padding: 3px 9px;
+  cursor: pointer;
+}
+.fig-toggle:hover { color: var(--ink); border-color: #2E4044; }
+.fig-toggle[aria-pressed="true"] { color: var(--ink); background: var(--raised); }
+.fig-empty { color: var(--ink-3); font-size: 12px; padding: 22px 0; text-align: center; }
+.fig-thin {
+  font-size: 10px;
+  color: var(--st-warn);
+  margin-top: 8px;
+  padding-top: 7px;
+  border-top: 1px solid var(--line-soft);
+}
+
+/* Wide content scrolls inside its own box; the page never scrolls sideways. */
+.fig-scroll { overflow-x: auto; max-height: 420px; overflow-y: auto; }
+.fig-scroll.tall { max-height: 520px; }
+
+.fig-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-family: var(--mono);
+  font-variant-numeric: tabular-nums;
+  font-size: 11px;
+}
+.fig-table th {
+  text-align: left;
+  font-family: var(--sans);
+  font-weight: 500;
+  font-size: 9px;
+  letter-spacing: .07em;
+  text-transform: uppercase;
+  color: var(--ink-3);
+  padding: 5px 10px 5px 0;
+  border-bottom: 1px solid var(--line);
+  position: sticky;
+  top: 0;
+  background: var(--panel);
+}
+.fig-table td {
+  padding: 4px 10px 4px 0;
+  border-bottom: 1px solid var(--line-soft);
+  color: var(--ink-2);
+  white-space: nowrap;
+}
+.fig-table tr:hover td { color: var(--ink); }
+.fig-table.clickable tr { cursor: pointer; }
+.fig-table.clickable tr.on td { color: var(--ink); background: var(--raised); }
+
+/* ------------------------------------------------------------------ marks */
+
+.chart { width: 100%; }
+/* Recessive, per §7.4: the data is the only thing with contrast. */
+.grid { stroke: var(--line-soft); stroke-width: 1; }
+.axis { stroke: var(--line); stroke-width: 1; }
+.rule { stroke: var(--ink-3); stroke-width: 1; stroke-dasharray: 3 3; opacity: .7; }
+.rule-label { font-family: var(--mono); font-size: 9px; fill: var(--ink-3); }
+.tick, .axis-label {
+  font-family: var(--mono);
+  font-size: 9px;
+  fill: var(--ink-3);
+}
+.axis-label { font-family: var(--sans); letter-spacing: .06em; }
+/* The one place a series colour touches text: the direct label *is* the
+   series, so tying it to the mark is what makes it readable. */
+.direct { font-family: var(--sans); font-size: 10px; font-weight: 500; }
+
+.legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 16px;
+  list-style: none;
+  margin: 9px 0 0;
+  padding: 0;
+  font-size: 10px;
+  color: var(--ink-2);
+}
+.legend li { display: flex; align-items: center; gap: 6px; }
+.legend .swatch { width: 9px; height: 3px; border-radius: 1px; }
+
+/* ------------------------------------------------------------------- tree */
+
+.tree-scroll {
+  overflow: auto;
+  max-height: 560px;
+  border: 1px solid var(--line-soft);
+  border-radius: var(--r);
+  background: var(--surface);
+}
+.tree-edge { stroke: var(--line); stroke-width: 1; }
+.tree-edge.faint { stroke: var(--line-soft); stroke-dasharray: 2 3; }
+.tree-node { cursor: pointer; }
+.tree-node circle { fill: var(--quick); stroke: none; }
+/* Hollow for the dead: readable without relying on hue. */
+.tree-node.dead circle { fill: var(--surface); stroke: var(--still); stroke-width: 1.5; }
+.tree-node text {
+  font-family: var(--sans);
+  font-size: 11px;
+  fill: var(--ink-2);
+  pointer-events: none;
+}
+.tree-node.dead text { fill: var(--ink-3); }
+.tree-node:hover text, .tree-node.on text { fill: var(--ink); }
+.tree-meta { font-family: var(--mono); font-size: 9px; fill: var(--ink-3); }
+.tree-toggle {
+  font-family: var(--mono);
+  font-size: 9px;
+  fill: var(--ink-3);
+  pointer-events: all;
+  cursor: pointer;
+}
+.tree-toggle:hover { fill: var(--quick); }
+
+/* ------------------------------------------------------------------- life */
+
+.life { display: grid; grid-template-columns: 220px 1fr; gap: 18px; align-items: start; }
+@media (max-width: 900px) { .life { grid-template-columns: 1fr; } }
+
+.life-roster input {
+  width: 100%;
+  font: inherit;
+  font-size: 11px;
+  color: var(--ink);
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--r);
+  padding: 6px 8px;
+  margin-bottom: 8px;
+}
+.life-roster ul {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  max-height: 620px;
+  overflow-y: auto;
+}
+.life-roster button {
+  width: 100%;
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  font: inherit;
+  font-size: 11px;
+  text-align: left;
+  color: var(--ink-2);
+  background: transparent;
+  border: 0;
+  border-radius: var(--r);
+  padding: 4px 7px;
+  cursor: pointer;
+}
+.life-roster button:hover { background: var(--raised); }
+.life-roster button.on { background: var(--raised); color: var(--ink); }
+.life-roster-meta { font-family: var(--mono); font-size: 9px; color: var(--ink-3); }
+
+.life-body { display: flex; flex-direction: column; gap: 16px; min-width: 0; }
+.life-head h2 {
+  font-family: var(--display);
+  font-weight: 700;
+  font-size: 20px;
+  margin: 0;
+  letter-spacing: -.02em;
+}
+.life-head p { font-size: 11px; color: var(--ink-2); margin: 3px 0 0; }
+.life-kin b { color: var(--ink); font-weight: 500; }
+
+.life-cols { display: grid; grid-template-columns: 1fr 1fr; gap: 18px; align-items: start; }
+@media (max-width: 1100px) { .life-cols { grid-template-columns: 1fr; } }
+
+.log {
+  list-style: none;
+  margin: 8px 0 0;
+  padding: 0;
+  max-height: 520px;
+  overflow-y: auto;
+  font-size: 11px;
+}
+.log li {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 7px;
+  padding: 4px 0;
+  border-bottom: 1px solid var(--line-soft);
+}
+.log li.fell-back { border-left: 2px solid var(--st-serious); padding-left: 7px; }
+.log-tick {
+  font-family: var(--mono);
+  font-size: 10px;
+  color: var(--ink-3);
+  min-width: 42px;
+}
+.log-kind { color: var(--ink); }
+.log-why { color: var(--ink-2); font-style: italic; }
+.log-payload { font-family: var(--mono); font-size: 10px; color: var(--ink-3); }
+.log-open {
+  font: inherit;
+  font-size: 9px;
+  letter-spacing: .05em;
+  color: var(--ink-3);
+  background: transparent;
+  border: 1px solid var(--line);
+  border-radius: var(--r);
+  padding: 1px 6px;
+  cursor: pointer;
+}
+.log-open:hover { color: var(--ink); }
+.log-prompt {
+  flex-basis: 100%;
+  font-family: var(--mono);
+  font-size: 10px;
+  line-height: 1.5;
+  color: var(--ink-2);
+  background: var(--void);
+  border: 1px solid var(--line-soft);
+  border-radius: var(--r);
+  padding: 9px 11px;
+  margin: 6px 0 2px;
+  max-height: 340px;
+  overflow: auto;
+  white-space: pre-wrap;
+}

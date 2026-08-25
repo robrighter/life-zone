@@ -43,7 +43,145 @@ fn main() {
             let ticks: i64 = args.get(4).and_then(|s| s.parse().ok()).unwrap_or(2000);
             run_report(seed, creatures, ticks);
         }
+        // measure report <path-to-sqlite>
+        "report" => report_dump(args.get(2).map(|s| s.as_str()).unwrap_or("")),
         other => eprintln!("unknown command {other}"),
+    }
+}
+
+/// Run every §10 aggregation against a database a real run wrote.
+///
+/// The unit tests exercise these against 700-tick fixtures on a 128×128 map,
+/// which is enough to prove the SQL is valid and the arithmetic holds. It is
+/// not enough to know whether the reports say anything on a full-size run —
+/// whether the survival curve has more than one point, whether coverage
+/// actually stalls, whether any band of the S6 chart has enough creatures in it
+/// to be worth drawing. That is what this is for.
+fn report_dump(path: &str) {
+    use life_zone_lib::report::{culture, queries};
+
+    if path.is_empty() {
+        eprintln!("usage: measure report <path-to-sqlite>");
+        return;
+    }
+    let conn = match rusqlite::Connection::open(path) {
+        Ok(c) => c,
+        Err(e) => return eprintln!("cannot open {path}: {e}"),
+    };
+    let w: i64 = conn
+        .query_row("SELECT id FROM worlds ORDER BY id DESC LIMIT 1", [], |r| r.get(0))
+        .unwrap_or(1);
+
+    macro_rules! show {
+        ($title:literal, $call:expr) => {
+            print!("\n-- {} ", $title);
+            println!("{}", "-".repeat(62usize.saturating_sub($title.len())));
+            match $call {
+                Ok(v) => {
+                    let json = serde_json::to_value(&v).unwrap_or(serde_json::Value::Null);
+                    match &json {
+                        serde_json::Value::Array(rows) if rows.is_empty() => {
+                            println!("  (no rows — this report has nothing to say about this run)")
+                        }
+                        serde_json::Value::Array(rows) => {
+                            for row in rows.iter().take(14) {
+                                println!("  {}", brief(row));
+                            }
+                            if rows.len() > 14 {
+                                println!("  … {} more", rows.len() - 14);
+                            }
+                        }
+                        other => println!("  {}", brief(other)),
+                    }
+                }
+                Err(e) => println!("  FAILED: {e}"),
+            }
+        };
+    }
+
+    println!("== REPORTS over {path} (world {w}) ==");
+    show!("headline", queries::headline(&conn, w));
+    show!("population", queries::population_series(&conn, w, 10));
+    show!("cause of death by generation", queries::cause_of_death_by_generation(&conn, w));
+    show!("age at death", queries::age_at_death(&conn, w, 96));
+    show!("deepest lineages", queries::deepest_lineages(&conn, w, 8));
+    show!("by generation", queries::by_generation(&conn, w));
+    show!("lineage survival", culture::lineage_survival(&conn, w));
+    show!("economy", queries::economy_series(&conn, w, 8));
+    show!("wood budget", culture::wood_budget(&conn, w, 8));
+    show!("farming adoption", queries::farming_adoption(&conn, w));
+    show!("household wealth", culture::household_wealth(&conn, w));
+    show!("map coverage", culture::map_coverage(&conn, w));
+    show!("knowledge half-life", culture::knowledge_half_life(&conn, w));
+    show!("belief accuracy by hops", culture::belief_accuracy(&conn, w));
+    show!("belief provenance", queries::belief_provenance(&conn, w));
+    show!("transmission", queries::transmission_by_channel(&conn, w));
+    show!("teaching vs depth", culture::teaching_vs_depth(&conn, w));
+    show!("roles", culture::roles(&conn, w));
+    show!("action by tier", queries::action_distribution_by_tier(&conn, w));
+    show!("deliberation vs lineage depth (S6)", culture::deliberation_vs_depth(&conn, w));
+    show!("horizon vs lineage depth", culture::horizon_vs_depth(&conn, w));
+    show!("compute by life stage", culture::compute_by_life_stage(&conn, w));
+    show!("elder autonomy", culture::elder_autonomy(&conn, w));
+    show!("pressure distribution", culture::pressure_distribution(&conn, w));
+    show!("latency", culture::latency(&conn, w));
+    show!("horizon gap", queries::horizon_gap(&conn, w));
+    show!("abort reasons", queries::abort_reasons(&conn, w));
+    show!("fallback reasons", queries::fallback_reasons(&conn, w));
+
+    // S5, against the longest life in the run rather than a chosen one.
+    let subject: Option<i64> = conn
+        .query_row(
+            "SELECT id FROM creatures WHERE world_id = ?1 AND death_tick IS NOT NULL
+              ORDER BY death_tick - birth_tick DESC LIMIT 1",
+            [w],
+            |r| r.get(0),
+        )
+        .ok();
+    println!("\n-- S5: one whole life {}", "-".repeat(44));
+    match subject.and_then(|id| queries::life(&conn, w, id).ok().flatten()) {
+        Some(l) => println!(
+            "  {} (g{}) lived {} ticks, died of {}\n  \
+             {} events, {} decisions, {} need samples, {} beliefs found ({} still circulating)\n  \
+             mother {}, father {}, {} children",
+            l.name,
+            l.generation,
+            l.death_tick.unwrap_or(0) - l.birth_tick,
+            l.death_cause.clone().unwrap_or_else(|| "?".into()),
+            l.events.len(),
+            l.decisions.len(),
+            l.samples.len(),
+            l.beliefs_found,
+            l.still_circulating,
+            l.mother.map(|m| m.1).unwrap_or_else(|| "—".into()),
+            l.father.map(|f| f.1).unwrap_or_else(|| "—".into()),
+            l.children.len(),
+        ),
+        None => println!("  nobody has died yet"),
+    }
+}
+
+/// One JSON object on one line, without the braces and quoting that make a
+/// terminal dump unreadable.
+fn brief(v: &serde_json::Value) -> String {
+    match v {
+        serde_json::Value::Object(m) => m
+            .iter()
+            .map(|(k, val)| {
+                let s = match val {
+                    serde_json::Value::String(s) => s.clone(),
+                    serde_json::Value::Number(n) => n
+                        .as_f64()
+                        .map(|f| if f.fract() == 0.0 { format!("{f:.0}") } else { format!("{f:.3}") })
+                        .unwrap_or_else(|| n.to_string()),
+                    serde_json::Value::Null => "—".into(),
+                    other => other.to_string(),
+                };
+                format!("{k}={s}")
+            })
+            .collect::<Vec<_>>()
+            .join("  "),
+        other => other.to_string(),
     }
 }
 
@@ -475,9 +613,26 @@ fn run_report(seed: u64, creatures: u32, ticks: i64) {
     // Persist for real. Phase 7 is part of a tick, so a tick-time measurement
     // that skips SQLite is not a measurement of the thing the criterion is
     // about.
-    let dir = std::env::temp_dir().join(format!("life-zone-measure-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    let db_path = dir.join("measure.sqlite3");
+    // `LZ_DB=<path>` keeps the database somewhere nameable, which is what makes
+    // `measure report <path>` usable afterwards — the pid-stamped temp
+    // directory is fine for a throwaway timing run and useless for anything you
+    // want to look at twice.
+    let db_path = match std::env::var("LZ_DB") {
+        Ok(p) => {
+            let p = std::path::PathBuf::from(p);
+            if let Some(parent) = p.parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+            let _ = std::fs::remove_file(&p);
+            p
+        }
+        Err(_) => {
+            let dir =
+                std::env::temp_dir().join(format!("life-zone-measure-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&dir);
+            dir.join("measure.sqlite3")
+        }
+    };
     let mut conn = life_zone_lib::db::open(&db_path).expect("open database");
     life_zone_lib::db::repo::create_world(&conn, "Measure", seed as i64, &cfg)
         .expect("world row");
@@ -960,5 +1115,14 @@ fn run_report(seed: u64, creatures: u32, ticks: i64) {
     let _ = economy::is_night(0, &cfg);
 
     drop(conn);
-    let _ = std::fs::remove_dir_all(&dir);
+    // A named database is the point of naming it — only the throwaway
+    // pid-stamped directory gets cleaned up. This deletion is why every earlier
+    // run left nothing behind to open a report against.
+    if std::env::var("LZ_DB").is_err() {
+        if let Some(dir) = db_path.parent() {
+            let _ = std::fs::remove_dir_all(dir);
+        }
+    } else {
+        println!("\ndatabase kept at {}", db_path.display());
+    }
 }

@@ -132,6 +132,13 @@ pub struct DecisionRecord {
     pub rationale: String,
     pub horizon_committed: u32,
     pub fallback_reason: Option<String>,
+    /// How far the belief this plan is aimed at has travelled, recorded when
+    /// the plan is *set*.
+    ///
+    /// Recording it only on a stale abort made §10's "belief accuracy by hop
+    /// count" degenerate: every row in the denominator was also in the
+    /// numerator, so the stale rate was 1.0 at every hop by construction.
+    pub belief_hops: Option<u8>,
 
     // ---- §5.8: every call recorded in full (invariant 4) ------------------
     pub age_weight: f32,
@@ -150,6 +157,7 @@ pub struct DecisionRecord {
 impl DecisionRecord {
     /// A Tier 1 decision: no call, no prompt, no cost beyond what the policy
     /// already charged.
+    #[allow(clippy::too_many_arguments)]
     fn tier1(
         tick: i64,
         c: &Creature,
@@ -158,6 +166,7 @@ impl DecisionRecord {
         rationale: String,
         horizon: u32,
         why: Option<String>,
+        belief_hops: Option<u8>,
     ) -> Self {
         Self {
             tick,
@@ -170,6 +179,7 @@ impl DecisionRecord {
             rationale,
             horizon_committed: horizon,
             fallback_reason: why,
+            belief_hops,
             age_weight: 1.0,
             think_budget: None,
             prompt_hash: None,
@@ -183,6 +193,21 @@ impl DecisionRecord {
             fallback_used: true,
         }
     }
+}
+
+/// The hop count of the belief a plan is aimed at.
+///
+/// Scans the plan's steps for the first target that resolves to a tile — the
+/// first step is almost always a MOVE_TO whose destination is the point of the
+/// whole errand — and takes the freshest belief covering it, which is the one
+/// the policy ranked and acted on.
+///
+/// `None` means the plan is not aimed at a remembered place at all (resting,
+/// courting, eating what is already carried), and those must stay out of
+/// §10's accuracy denominator rather than counting as accurate.
+fn plan_belief_hops(c: &Creature, plan: &crate::sim::creature::Plan, world: &crate::sim::world::World) -> Option<u8> {
+    let tile = plan.steps.iter().find_map(|s| s.target.tile(world))?;
+    c.beliefs.iter().filter(|b| (b.x, b.y) == tile).map(|b| b.hops).min()
 }
 
 /// Whether full prompt text is still retained at this tick (§7's retention
@@ -841,6 +866,8 @@ impl Sim {
 
             plan.ticks_remaining = plan.ticks_remaining.saturating_sub(1);
 
+            // Completion is recorded in phase 5, where a finished plan is
+            // actually dropped; a plan still here has steps left to run.
             let ended = if let Some((reason, crises)) = hard {
                 // A crisis interrupts a plan unless the plan is already the
                 // answer to one of them. Without this a creature dying of
@@ -948,6 +975,7 @@ impl Sim {
             };
             let c = &mut self.creatures[i];
             let goal = plan.steps.first().map(|s| s.goal.as_str()).unwrap_or("NONE");
+            let belief_hops = plan_belief_hops(c, &plan, &self.world);
 
             self.decisions.push(DecisionRecord::tier1(
                 self.tick,
@@ -964,6 +992,7 @@ impl Sim {
                     }
                     .to_string(),
                 ),
+                belief_hops,
             ));
 
             c.last_deliberation_tick = Some(self.tick);
@@ -1174,6 +1203,8 @@ impl Sim {
                     rationale: String::new(),
                     horizon_committed: 0,
                     fallback_reason: Some("CREATURE_DIED_WHILE_THINKING".into()),
+                    // There is no plan and no creature left to have aimed it.
+                    belief_hops: None,
                     age_weight: 0.0,
                     think_budget: Some(done.depth.as_str()),
                     prompt_hash: Some(done.prompt.hash()),
@@ -1258,6 +1289,9 @@ impl Sim {
                 rationale: String::new(),
                 horizon_committed: 0,
                 fallback_reason: why.clone(),
+                // Filled in below once the model's plan has been validated:
+                // an unvalidated plan was never aimed anywhere.
+                belief_hops: None,
                 age_weight,
                 think_budget: Some(done.depth.as_str()),
                 prompt_hash: Some(done.prompt.hash()),
@@ -1293,6 +1327,8 @@ impl Sim {
                     });
                     c.last_deliberation_tick = Some(self.tick);
                     c.dirty = true;
+                    record.belief_hops =
+                        c.plan.as_ref().and_then(|p| plan_belief_hops(c, p, &self.world));
                     self.events.push(
                         Event::new(self.tick, EventKind::Deliberated, c.id)
                             .with_int("horizon", v.horizon as i64)
@@ -1351,6 +1387,7 @@ impl Sim {
             };
 
             let c = &mut self.creatures[i];
+            let cid = c.id;
             let mut failure = None;
 
             if let Some(step) = plan.steps.get_mut(plan.step_index) {
@@ -1399,7 +1436,22 @@ impl Sim {
                     // still — the cost of having been wrong.
                 }
                 _ => {
-                    if !plan.is_done() {
+                    if plan.is_done() {
+                        // A finished plan is recorded *here*, because here is
+                        // where it ends: it is not put back, so phase 6 never
+                        // sees it and the `is_done()` branch there can never
+                        // fire. Until this existed, `COMPLETED` reached the
+                        // decision log zero times in a 2,500-tick run and every
+                        // plan that worked was counted against the abandonment
+                        // rate invariant 8 watches.
+                        self.plan_outcomes.push(PlanOutcome {
+                            creature_id: cid,
+                            set_tick: plan.set_tick,
+                            horizon_actual: (self.tick - plan.set_tick).max(0) as u32,
+                            reason: AbortReason::Completed,
+                            belief_hops: None,
+                        });
+                    } else {
                         self.creatures[i].plan = Some(plan);
                     }
                 }
@@ -1819,6 +1871,22 @@ impl Sim {
             let n = self.transfer_beliefs(from, to, Channel::Observation, None);
             if n > 0 {
                 report.beliefs_overheard += n as u32;
+                // Observation is how knowledge actually moves in a Tier-1 run —
+                // it produced every secondhand belief in a 2,500-tick run and
+                // left no trace of doing it, so §10's transmission graph and
+                // "how knowledge moves" were both permanently empty.
+                //
+                // The row goes in `transmissions` and not in `events` on
+                // purpose: §7 designed that table to be the coarse record of
+                // who told whom, and an event per overhearing would put back
+                // the per-tick volume the routine collapse exists to remove.
+                self.transmissions.push(TransmissionRecord {
+                    tick: self.tick,
+                    from,
+                    to,
+                    channel: Channel::Observation,
+                    count: n as u32,
+                });
             }
         }
     }
@@ -2115,9 +2183,18 @@ impl Sim {
 
         let mut counts = [0u32; 5];
         let mut exposed = 0u32;
+        // Collapsing throws away the payloads along with the rows, and for
+        // eating the payload *is* the report: §10's "food spoiled vs food
+        // eaten" is denominated in quantity, not in meals. Without this the
+        // consumption line is flat zero for every run ever recorded, which is
+        // what it was until the reporting view was pointed at a real database.
+        let mut ate_qty = 0.0f32;
         self.events.retain(|e| {
             if let Some(i) = ROUTINE.iter().position(|k| *k == e.kind) {
                 counts[i] += 1;
+                if e.kind == K::Ate {
+                    ate_qty += e.num("qty").unwrap_or(0.0);
+                }
                 return false;
             }
             if e.kind == K::ExposedNight {
@@ -2133,6 +2210,12 @@ impl Sim {
                 ev = ev.with_int(&kind.as_str().to_lowercase(), counts[i] as i64);
             }
             self.events.push(ev);
+        }
+        if ate_qty > 0.0 {
+            // One aggregate ATE a tick with the summed quantity, so the
+            // economy query reads consumption the same way it reads every
+            // other flow and nothing has to know about the collapse.
+            self.events.push(Event::new(self.tick, K::Ate, 0).with_num("qty", ate_qty));
         }
         if exposed > 0 {
             // The per-creature consequence is already recorded where it

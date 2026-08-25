@@ -171,8 +171,11 @@ pub struct AccuracyRow {
 /// flat, hop count is cosmetic and transmission is free — which would make the
 /// culture layer a story the UI tells rather than a mechanic.
 ///
-/// Reads `decisions.belief_hops` (migration 004), which is populated only on
-/// aborts where the world contradicted a belief.
+/// `decisions.belief_hops` (migration 004) is written when a plan is *set*, so
+/// the denominator is every plan aimed at a remembered place and the numerator
+/// is the subset the world contradicted. Recording it only on failure — which
+/// is how this was first built — makes both sides the same set and the rate
+/// 1.0 at every hop, which is a chart that cannot say anything.
 pub fn belief_accuracy(conn: &Connection, world: i64) -> Result<Vec<AccuracyRow>> {
     let mut stmt = conn.prepare(
         "SELECT belief_hops,
@@ -1020,6 +1023,86 @@ mod tests {
                 "generation {gen}'s roles sum to {total}, so somebody has two \
                  jobs or none"
             );
+        }
+    }
+
+    #[test]
+    fn a_plan_that_finishes_is_recorded_as_having_finished() {
+        // `COMPLETED` reached the decision log zero times across a 2,500-tick
+        // run, because the crisis check ran before the done check and a plan
+        // that finished while its creature was hungry was logged under
+        // HUNGER_CRITICAL. Every successful plan counted against the
+        // abandonment rate that invariant 8 treats as a production metric.
+        let (conn, w) = run(600);
+        let (completed, ended): (i64, i64) = conn
+            .query_row(
+                "SELECT SUM(CASE WHEN abort_reason = 'COMPLETED' THEN 1 ELSE 0 END),
+                        SUM(CASE WHEN abort_reason IS NOT NULL   THEN 1 ELSE 0 END)
+                   FROM decisions WHERE world_id = ?1",
+                [w],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert!(ended > 0, "600 ticks should end some plans");
+        assert!(
+            completed > 0,
+            "not one plan out of {ended} is recorded as having succeeded, which \
+             means the abandonment rate is measuring every plan there was"
+        );
+    }
+
+    #[test]
+    fn every_channel_that_moves_a_belief_leaves_a_record() {
+        // Observation moved every secondhand belief in a 2,500-tick run and
+        // wrote nothing to `transmissions`, so §10's transmission graph and
+        // "how knowledge moves" were structurally empty. The test is not "some
+        // channel was recorded" but "the recorded channels account for the
+        // secondhand beliefs that exist".
+        let (conn, w) = run(700);
+        let secondhand: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM beliefs WHERE world_id = ?1 AND hops > 0",
+                [w],
+                |r| r.get(0),
+            )
+            .unwrap();
+        let recorded: i64 = conn
+            .query_row(
+                "SELECT COALESCE(SUM(belief_count), 0) FROM transmissions WHERE world_id = ?1",
+                [w],
+                |r| r.get(0),
+            )
+            .unwrap();
+        if secondhand == 0 {
+            return; // nothing was passed on in this window; not this test's claim
+        }
+        assert!(
+            recorded > 0,
+            "{secondhand} beliefs are held at second hand and the transmission \
+             log says nobody ever told anybody anything"
+        );
+    }
+
+    #[test]
+    fn belief_accuracy_has_a_denominator_larger_than_its_numerator() {
+        // Recording the hop count only on a stale abort put every row of the
+        // denominator into the numerator, so the rate was 1.0 at every hop by
+        // construction — a chart incapable of saying anything.
+        let (conn, w) = run(700);
+        let rows = belief_accuracy(&conn, w).unwrap();
+        if rows.is_empty() {
+            return;
+        }
+        let acted: i64 = rows.iter().map(|r| r.acted_on).sum();
+        let stale: i64 = rows.iter().map(|r| r.stale).sum();
+        assert!(acted > 0);
+        assert!(
+            stale < acted,
+            "{stale} of {acted} beliefs acted on turned out stale; a rate of \
+             exactly 1.0 means the denominator is the numerator"
+        );
+        for r in &rows {
+            assert!(r.stale_rate >= 0.0 && r.stale_rate <= 1.0);
         }
     }
 

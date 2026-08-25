@@ -281,9 +281,9 @@ pub fn insert_decisions(tx: &Transaction, world_id: i64, rows: &[DecisionRecord]
             age_weight, think_budget, prompt_hash, prompt_text, raw_response,
             parsed_plan_json, horizon_committed,
             fatigue_cost, hunger_cost, crisis_exempt,
-            latency_ms, model, fallback_used, fallback_reason)
+            latency_ms, model, fallback_used, fallback_reason, belief_hops)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13,
-                 ?14, ?15, ?16, ?17, ?18, ?19, ?20)",
+                 ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21)",
     )?;
     for d in rows {
         // Compact rather than a full plan blob: at M2 the goal, the intent and
@@ -316,6 +316,7 @@ pub fn insert_decisions(tx: &Transaction, world_id: i64, rows: &[DecisionRecord]
             d.model,
             d.fallback_used as i64,
             d.fallback_reason,
+            d.belief_hops.map(|h| h as i64),
         ])?;
     }
     Ok(())
@@ -334,8 +335,12 @@ pub fn backfill_plan_outcomes(
         return Ok(());
     }
     let mut stmt = tx.prepare_cached(
-        "UPDATE decisions SET horizon_actual = ?4, abort_reason = ?5, belief_hops = ?6
-         WHERE world_id = ?1 AND creature_id = ?2 AND tick = ?3",
+        // COALESCE, not assignment: the hop count is written when the plan is
+        // set, and an outcome that carries none must not erase it.
+        "UPDATE decisions
+            SET horizon_actual = ?4, abort_reason = ?5,
+                belief_hops = COALESCE(belief_hops, ?6)
+          WHERE world_id = ?1 AND creature_id = ?2 AND tick = ?3",
     )?;
     for o in outcomes {
         stmt.execute(rusqlite::params![

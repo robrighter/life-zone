@@ -7,6 +7,7 @@ import {
 import { MapView, type BenchResult, type MapStats, type Overlays } from "./map/MapView";
 import { TERRAIN_NAMES, TERRAIN_SETS } from "./map/palette";
 import { Inspector } from "./panels/Inspector";
+import { ReportView } from "./report/ReportView";
 import { PALETTES, usePalette } from "./ui/usePalette";
 
 const MODES: { id: SpeedMode; name: string; sub: string }[] = [
@@ -30,6 +31,8 @@ export default function App() {
   const [selectedId, setSelectedId] = useState<number | null>(null);
   const [benchFrames, setBenchFrames] = useState<number | null>(null);
   const [bench, setBench] = useState<BenchResult | null>(null);
+  // §9.4: a separate full-window view, not a side panel.
+  const [reporting, setReporting] = useState(false);
   const [overlays, setOverlays] = useState<Overlays>({
     nodes: true, creatures: true, structures: true, plans: true, knowledge: false,
     deliberation: true,
@@ -132,10 +135,17 @@ export default function App() {
     : "—";
   const totalDeaths = snap?.deaths_by_cause.reduce((a, [, n]) => a + n, 0) ?? 0;
 
+  if (reporting) {
+    return <ReportView onClose={() => setReporting(false)} />;
+  }
+
   return (
     <div className="app">
       <header className="topbar">
         <span className="brand">Life Zone</span>
+        <button className="btn" onClick={() => setReporting(true)}>
+          The record
+        </button>
 
         <div className="topbar-right">
           <div className="pal-switch">

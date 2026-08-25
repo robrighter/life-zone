@@ -22,3 +22,6 @@ dist-ssr
 *.njsproj
 *.sln
 *.sw?
+
+# Databases kept by `measure run` with LZ_DB set.
+.runs/

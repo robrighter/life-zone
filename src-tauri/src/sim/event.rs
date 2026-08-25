@@ -177,6 +177,20 @@ impl Event {
         self.with(key, &v)
     }
 
+    /// Read a numeric field back out.
+    ///
+    /// The mirror of `with_num`, and the same parse the report SQL does in
+    /// `report::queries::payload_num` — kept here so the collapse in
+    /// `tick::collapse_routine_events` can total quantities before it discards
+    /// the rows carrying them.
+    pub fn num(&self, key: &str) -> Option<f32> {
+        let needle = format!("{key}=");
+        let start = self.payload.find(&needle)? + needle.len();
+        let rest = &self.payload[start..];
+        let end = rest.find(' ').unwrap_or(rest.len());
+        rest[..end].parse().ok()
+    }
+
     /// Stable line form, used by the golden-run digest.
     pub fn digest_line(&self) -> String {
         format!(
@@ -195,6 +209,21 @@ impl Event {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_numeric_field_reads_back_as_it_was_written() {
+        let e = Event::new(1, EventKind::Ate, 7)
+            .with("kind", "FORAGE")
+            .with_num("qty", 1.5)
+            .with_int("n", 3);
+        assert_eq!(e.num("qty"), Some(1.50));
+        assert_eq!(e.num("n"), Some(3.0));
+        // A prefix of another key must not match, and a missing key is None
+        // rather than zero — a report that cannot tell those apart will show a
+        // flat line and call it data.
+        assert_eq!(e.num("q"), None);
+        assert_eq!(e.num("missing"), None);
+    }
 
     #[test]
     fn payload_field_order_is_fixed_by_construction() {

@@ -55,6 +55,13 @@ pub(crate) fn world_tiles(conn: &Connection, world: i64) -> f64 {
 /// The four numbers at the top of the reporting view.
 #[derive(Debug, Clone, Serialize, Default)]
 pub struct Headline {
+    /// The highest `creatures.generation` any creature reached — the number
+    /// M4's exit criterion ("a lineage reaches generation 3") is graded on.
+    ///
+    /// Deliberately not the lineage *depth* from `deepest_lineages`, which is
+    /// zero-based and counts steps below a founder. Reporting depth here made
+    /// the headline read "generation 0" for a run whose founders were all
+    /// generation 1, which is the kind of off-by-one that gets believed.
     pub deepest_generation: i64,
     pub deepest_founder: Option<String>,
     pub deepest_descendants: i64,
@@ -71,7 +78,18 @@ pub struct Headline {
 }
 
 pub fn headline(conn: &Connection, world: i64) -> Result<Headline> {
-    let mut h = Headline { baseline_ticks: 672, ..Default::default() };
+    let mut h = Headline::default();
+    // From the world's own config, not a constant: every dial is tunable per
+    // world (§11), so a hardcoded baseline would quietly lie on any run of M6's
+    // sweep that moved it.
+    h.baseline_ticks = conn
+        .query_row(
+            "SELECT json_extract(config_json, '$.lifespan.baseline_ticks')
+               FROM worlds WHERE id = ?1",
+            [world],
+            |r| r.get(0),
+        )
+        .unwrap_or(672);
 
     h.through_tick = conn
         .query_row("SELECT current_tick FROM worlds WHERE id = ?1", [world], |r| r.get(0))
@@ -84,8 +102,15 @@ pub fn headline(conn: &Connection, world: i64) -> Result<Headline> {
     )?;
     h.living = h.total_born - h.total_dead;
 
+    h.deepest_generation = conn
+        .query_row(
+            "SELECT COALESCE(MAX(generation), 0) FROM creatures WHERE world_id = ?1",
+            [world],
+            |r| r.get(0),
+        )
+        .unwrap_or(0);
+
     if let Some(top) = deepest_lineages(conn, world, 1)?.first() {
-        h.deepest_generation = top.depth;
         h.deepest_founder = Some(top.founder_name.clone());
         h.deepest_descendants = top.descendants;
     }
@@ -999,6 +1024,48 @@ mod tests {
         let mut last = TickReport { tick: sim.tick, ..Default::default() };
         sim.persist(&mut conn, &mut last, true).unwrap();
         (conn, 1)
+    }
+
+    #[test]
+    fn the_economy_records_what_was_eaten_and_not_only_what_was_gathered() {
+        // This is the test that was missing. `economy_series` had a passing
+        // test and returned `eaten = 0` for every tick of every run ever made,
+        // because ATE is collapsed by `collapse_routine_events` and the
+        // collapse discarded the quantity along with the row. A report that is
+        // structurally incapable of being non-zero will never fail an
+        // assertion about its shape — only one about its content.
+        let (conn, w) = run(500);
+        let econ = economy_series(&conn, w, 20).unwrap();
+        assert!(!econ.is_empty());
+
+        let eaten: f64 = econ.iter().map(|p| p.eaten).sum();
+        let gathered: f64 = econ.iter().map(|p| p.gathered).sum();
+        assert!(gathered > 0.0, "500 ticks with nothing gathered is not a run");
+        assert!(
+            eaten > 0.0,
+            "creatures that never eat still starve; consumption cannot be zero \
+             across {} buckets when {gathered:.1} units were gathered",
+            econ.len()
+        );
+    }
+
+    #[test]
+    fn the_headline_reports_the_generation_reached_not_the_lineage_depth() {
+        let (conn, w) = run(500);
+        let h = headline(&conn, w).unwrap();
+        let max_gen: i64 = conn
+            .query_row(
+                "SELECT MAX(generation) FROM creatures WHERE world_id = ?1",
+                [w],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            h.deepest_generation, max_gen,
+            "founders are generation 1, so a headline of 0 is an off-by-one \
+             against the number M4 is graded on"
+        );
+        assert!(h.baseline_ticks > 0, "the baseline comes from the world's own config");
     }
 
     #[test]

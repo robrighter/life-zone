@@ -28,7 +28,7 @@ through a reporting layer.
 | **M2 — Deterministic life** | Done. Needs, life stages, death with cause, actions, A* pathfinding, spoilage and fuel, the belief substrate, Tier 0/1. Exit criterion measured (below) |
 | **M3 — Deliberation** | Done. Ollama client and dispatcher, prompt assembly, plan schema with strict validation, budget scheduler, thinking cost, full decision logging |
 | **M4 — Society** | Done (brought forward ahead of M3 — see the commit history). Households, courtship, reproduction, infants, inheritance, knowledge transmission, age-weighted deliberation |
-| **M5 — Reporting** | **In progress.** The Rust side is built: `report::queries` and `report::culture`, every §10 report exposed as a Tauri command, CSV export, and migration `004_reporting.sql` for the two aggregations the event log could not supply. The React reporting view is not built yet — `src/` has the map and inspector but no `report/` |
+| **M5 — Reporting** | **Done.** `report::queries` and `report::culture` cover §10; every report is a Tauri command and a CSV; migration `004_reporting.sql` adds the two aggregations the event log could not supply. `src/report/` is the full-window view (§9.4) — nine tabs, a chart kit that enforces the §7.4 rules structurally, an interactive lineage tree, and a life story with every prompt. **S5 holds and is tested.** Writing the queries turned up five defects in M2–M4 that no other test had caught — see *Measured results* |
 | **M6 — Tuning** | Not started. Balance passes against S3/S4/S6/S7, prompt iteration, Focus mode, overlays |
 
 None of the seven success criteria in PRD §2.3 have been signed off on three seeds; that is
@@ -252,10 +252,20 @@ These are measurements with their conditions, not claims about the design.
 writing to SQLite for real, since a tick-time measurement that skips the write is not a
 measurement of the thing the criterion is about):
 
-- p50 **4.32 ms/tick**, p95 **20.03 ms**, p99 **29.22 ms** against a 50 ms budget
-- **0.30%** of ticks over budget
-- Largest single cause of death **38.5%**, against the "no cause above ~60%" non-degeneracy bar
+- p50 **5.8 ms/tick**, p95 **~32 ms** against a 50 ms budget, over four runs
+- **~1%** of ticks over budget
+- Largest single cause of death **33.9%**, against the "no cause above ~60%" non-degeneracy bar
 
+An earlier reading of this same measurement — p50 4.32 ms, p95 20.03 ms, 0.30% over budget —
+does not reproduce on this machine today, including on unmodified pre-M5 code checked out into
+a separate worktree and rebuilt. Run-to-run spread on the p95 is currently ±5 ms and on the
+over-budget share ±1 point, which is wider than most of the differences anyone would want to
+draw a conclusion from. The older figure is left here as a record of what the machine could do,
+not as a target to compare against.
+
+M5's instrumentation costs about **6% on the median tick** and nothing measurable at p95,
+measured against that same pre-M5 worktree. Most of it is the ~86,000 plan completions per
+1,000-tick run that are now recorded and previously were not (see below).
 **M3 / S6 — the two tiers do diverge.** Asked about the same creature, in the same state, from
 the same pre-validated menu:
 
@@ -264,6 +274,23 @@ the same pre-validated menu:
 - **23%** fallback rate
 - **~4.5 s** per call, and a **13-tick** end-to-end round trip from asking to taking delivery,
   on ARM64 CPU-only Ollama
+
+**M5 finding — the plan-abandonment rate was measuring only the failures.** A plan that ran out
+of steps was dropped in phase 5 and never handed to phase 6, so the branch that recorded
+`COMPLETED` could not fire: across a 2,500-tick run, not one plan in the decision log was
+recorded as having succeeded. Every plan that worked was counted against the abandonment rate
+that invariant 8 treats as a production metric. With completions recorded:
+
+- **86,209 plans complete** against ~51,000 abandoned in a 1,000-tick run at 500 creatures —
+  roughly **63% of plans succeed**, where the log previously implied none did
+- The "abandonment gap" of committed **10.5** against actual **3.7** was an average over
+  failures alone. Including successes it is **10.5 against 2.8** — which is a different
+  finding: plans are not mostly being abandoned, they are mostly *finishing early*, against a
+  horizon estimate roughly four times longer than the work takes
+
+That reframes §13.9 ("can the model estimate horizons at all?") as a question about Tier 1
+first: the deterministic policy's own horizon estimate is the thing that is wrong, and it is
+the control the model is measured against. This is M6's to fix, not M5's.
 
 **M4 open finding — at PRD default dials, Tier 1 cannot sustain lineages.** The arithmetic:
 setup to a first child takes roughly 300 ticks, a second needs gestation plus birth spacing on
@@ -288,10 +315,13 @@ run as an experiment.
 - **`HERD_SHEEP`, `BUILD_PEN` and `REQUEST_FOOD` are deferred.** Sheep exist in the world and
   in worldgen, but the herding path is not implemented, so the "capital/compounding" leg of the
   three-food risk portfolio (PRD §4.4) is not yet exercisable.
-- **The reporting view is backend-only.** Every report query and CSV export is
-  reachable over IPC, but there is no React reporting screen yet. M5's exit criterion (S5 —
-  any creature's full life reconstructable) is satisfiable from the database and the commands,
-  not from the UI.
+- **`ai::budget::habit_bonus` is written, tested, and never called.** The elder habit prior
+  (PRD §5.4) exists as a function and `Creature::habit` is initialised to zeros, serialised,
+  and never incremented — so §10's "elder habit-prior hit rate" has no mechanism to measure and
+  the report answers §13.10's underlying question instead. Wiring it changes Tier 1, which is
+  the S6 control, so it belongs to M6 with a before/after measurement rather than to M5.
+- **Tier 1's horizon estimate is roughly 4× too long** — see *Measured results*. Known, not yet
+  tuned.
 
 ## Platform notes
 
