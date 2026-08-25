@@ -228,6 +228,26 @@ report_cmd!(report_fallbacks, report::queries::fallback_reasons);
 report_cmd!(report_transmission, report::queries::transmission_by_channel);
 report_cmd!(report_beliefs, report::queries::belief_provenance);
 report_cmd!(report_roster, report::queries::roster, limit: i64);
+
+// The knowledge, planning and selection reports — the ones the success
+// criteria are graded on rather than the ones that describe the run.
+report_cmd!(report_coverage, report::culture::map_coverage);
+report_cmd!(report_half_life, report::culture::knowledge_half_life);
+report_cmd!(report_accuracy, report::culture::belief_accuracy);
+report_cmd!(report_teaching, report::culture::teaching_vs_depth);
+report_cmd!(report_graph, report::culture::transmission_graph, limit: i64);
+report_cmd!(report_s6, report::culture::deliberation_vs_depth);
+report_cmd!(report_planners, report::culture::horizon_vs_depth);
+report_cmd!(report_survival, report::culture::lineage_survival);
+report_cmd!(report_stage_compute, report::culture::compute_by_life_stage);
+report_cmd!(report_elders, report::culture::elder_autonomy);
+report_cmd!(report_pressure, report::culture::pressure_distribution);
+report_cmd!(report_latency, report::culture::latency);
+report_cmd!(report_horizon_gen, report::culture::horizon_by_generation);
+report_cmd!(report_roles, report::culture::roles);
+report_cmd!(report_action_gen, report::culture::actions_by_generation);
+report_cmd!(report_wealth, report::culture::household_wealth);
+report_cmd!(report_wood, report::culture::wood_budget, buckets: i64);
 report_cmd!(report_life, report::queries::life, id: i64);
 
 /// Write every report to CSV and return where they went.
@@ -267,6 +287,23 @@ fn export_reports_csv(state: tauri::State<'_, AppState>) -> Result<String, Strin
     dump!("transmission", report::queries::transmission_by_channel(&conn, w));
     dump!("belief_provenance", report::queries::belief_provenance(&conn, w));
     dump!("roster", report::queries::roster(&conn, w, 100_000));
+    dump!("map_coverage", report::culture::map_coverage(&conn, w));
+    dump!("knowledge_half_life", report::culture::knowledge_half_life(&conn, w));
+    dump!("belief_accuracy", report::culture::belief_accuracy(&conn, w));
+    dump!("teaching_vs_depth", report::culture::teaching_vs_depth(&conn, w));
+    dump!("transmission_graph", report::culture::transmission_graph(&conn, w, 5_000));
+    dump!("deliberation_vs_depth", report::culture::deliberation_vs_depth(&conn, w));
+    dump!("horizon_vs_depth", report::culture::horizon_vs_depth(&conn, w));
+    dump!("lineage_survival", report::culture::lineage_survival(&conn, w));
+    dump!("compute_by_life_stage", report::culture::compute_by_life_stage(&conn, w));
+    dump!("elder_autonomy", report::culture::elder_autonomy(&conn, w));
+    dump!("pressure_distribution", report::culture::pressure_distribution(&conn, w));
+    dump!("latency", report::culture::latency(&conn, w));
+    dump!("horizon_by_generation", report::culture::horizon_by_generation(&conn, w));
+    dump!("roles", report::culture::roles(&conn, w));
+    dump!("actions_by_generation", report::culture::actions_by_generation(&conn, w));
+    dump!("household_wealth", report::culture::household_wealth(&conn, w));
+    dump!("wood_budget", report::culture::wood_budget(&conn, w, 400));
 
     tracing::info!(path = %dir.display(), files = wrote, "exported reports");
     Ok(dir.display().to_string())
@@ -470,7 +507,12 @@ pub fn run() {
             report_lineages, report_lineage_tree, report_generations, report_economy,
             report_farming, report_actions, report_deliberation, report_horizons,
             report_aborts, report_fallbacks, report_transmission, report_beliefs,
-            report_roster, report_life, export_reports_csv
+            report_roster, report_life, export_reports_csv,
+            report_coverage, report_half_life, report_accuracy, report_teaching,
+            report_graph, report_s6, report_planners, report_survival,
+            report_stage_compute, report_elders, report_pressure, report_latency,
+            report_horizon_gen, report_roles, report_action_gen, report_wealth,
+            report_wood
         ])
         .run(tauri::generate_context!())
         .expect("error while running Life Zone");

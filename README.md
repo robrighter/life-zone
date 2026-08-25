@@ -28,7 +28,7 @@ through a reporting layer.
 | **M2 — Deterministic life** | Done. Needs, life stages, death with cause, actions, A* pathfinding, spoilage and fuel, the belief substrate, Tier 0/1. Exit criterion measured (below) |
 | **M3 — Deliberation** | Done. Ollama client and dispatcher, prompt assembly, plan schema with strict validation, budget scheduler, thinking cost, full decision logging |
 | **M4 — Society** | Done (brought forward ahead of M3 — see the commit history). Households, courtship, reproduction, infants, inheritance, knowledge transmission, age-weighted deliberation |
-| **M5 — Reporting** | **In progress.** The Rust side is built: `report::queries` and `report::culture`, eighteen report commands, CSV export, and migration `004_reporting.sql` for the two aggregations the event log could not supply. The React reporting view is not built yet — `src/` has the map and inspector but no `report/` |
+| **M5 — Reporting** | **In progress.** The Rust side is built: `report::queries` and `report::culture`, every §10 report exposed as a Tauri command, CSV export, and migration `004_reporting.sql` for the two aggregations the event log could not supply. The React reporting view is not built yet — `src/` has the map and inspector but no `report/` |
 | **M6 — Tuning** | Not started. Balance passes against S3/S4/S6/S7, prompt iteration, Focus mode, overlays |
 
 None of the seven success criteria in PRD §2.3 have been signed off on three seeds; that is
@@ -288,7 +288,7 @@ run as an experiment.
 - **`HERD_SHEEP`, `BUILD_PEN` and `REQUEST_FOOD` are deferred.** Sheep exist in the world and
   in worldgen, but the herding path is not implemented, so the "capital/compounding" leg of the
   three-food risk portfolio (PRD §4.4) is not yet exercisable.
-- **The reporting view is backend-only.** All eighteen report queries and CSV export are
+- **The reporting view is backend-only.** Every report query and CSV export is
   reachable over IPC, but there is no React reporting screen yet. M5's exit criterion (S5 —
   any creature's full life reconstructable) is satisfiable from the database and the commands,
   not from the UI.

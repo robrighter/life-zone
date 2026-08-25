@@ -1059,7 +1059,13 @@ fn repair_shelter(c: &mut Creature, step: &Step, ctx: &mut ActionCtx) -> Outcome
     s.condition = (s.condition + wood * 0.15).min(1.0);
     s.dirty = true;
     ctx.events.push(
-        Event::new(ctx.tick, EventKind::ShelterRepaired, c.id).at(s.x, s.y).target(id),
+        // The wood belongs in the payload: without it a repair is invisible to
+        // §10's timber-vs-fuel split, which then never balances against what
+        // was chopped.
+        Event::new(ctx.tick, EventKind::ShelterRepaired, c.id)
+            .at(s.x, s.y)
+            .target(id)
+            .with_num("wood", wood),
     );
     Outcome::StepComplete
 }

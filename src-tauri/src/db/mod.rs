@@ -67,6 +67,14 @@ pub fn migrate(conn: &Connection) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    /// The newest migration's version. Asserting against this rather than a
+    /// literal keeps these tests about the property — "applying every migration
+    /// lands on the newest one" — instead of turning every schema change into a
+    /// three-line edit that verifies nothing.
+    fn latest() -> i32 {
+        MIGRATIONS.last().map(|(v, ..)| *v).unwrap_or(0)
+    }
+
     use super::*;
 
     fn mem() -> Connection {
@@ -80,7 +88,7 @@ mod tests {
     fn migrations_apply_from_empty() {
         let conn = mem();
         let v: i32 = conn.query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap();
-        assert_eq!(v, 3);
+        assert_eq!(v, latest(), "the database should end at the newest migration");
     }
 
     #[test]
@@ -89,7 +97,7 @@ mod tests {
         // Running again must be a no-op rather than an error.
         migrate(&conn).unwrap();
         let v: i32 = conn.query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap();
-        assert_eq!(v, 3);
+        assert_eq!(v, latest(), "the database should end at the newest migration");
     }
 
     #[test]
@@ -103,7 +111,7 @@ mod tests {
         migrate(&conn).unwrap();
 
         let v: i32 = conn.query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap();
-        assert_eq!(v, 3);
+        assert_eq!(v, latest(), "the database should end at the newest migration");
         let n: i32 = conn
             .query_row("SELECT COUNT(*) FROM pragma_table_info('creatures') WHERE name = 'wear'",
                        [], |r| r.get(0))

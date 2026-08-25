@@ -61,14 +61,7 @@ pub struct CoveragePoint {
 /// zero — a gap in sampling is not a collapse in knowledge, and plotting it as
 /// one would manufacture exactly the signal this chart exists to detect.
 pub fn map_coverage(conn: &Connection, world: i64) -> Result<Vec<CoveragePoint>> {
-    let tiles: f64 = conn
-        .query_row(
-            "SELECT width * height FROM worlds WHERE id = ?1",
-            [world],
-            |r| r.get::<_, i64>(0),
-        )
-        .unwrap_or(1) as f64;
-    let tiles = tiles.max(1.0);
+    let tiles = super::queries::world_tiles(conn, world);
 
     let mut stmt = conn.prepare(
         "SELECT tick, known_tiles, population
@@ -875,27 +868,27 @@ pub fn wood_budget(conn: &Connection, world: i64, buckets: i64) -> Result<Vec<Wo
     )?;
     let width = (((span.1 - span.0 + 1) as f64) / buckets.max(1) as f64).ceil().max(1.0) as i64;
 
-    let mut stmt = conn.prepare(
+    let wood = super::queries::payload_num("wood");
+    let qty = super::queries::payload_num("qty");
+    let sql = format!(
         "SELECT (tick / ?2) * ?2,
-                SUM(CASE WHEN kind = 'CHOPPED'         THEN qty ELSE 0 END),
+                SUM(CASE WHEN kind = 'CHOPPED' THEN {qty} ELSE 0 END),
                 SUM(CASE WHEN kind IN ('SHELTER_BUILT','SHELTER_REPAIRED')
-                                                        THEN qty ELSE 0 END),
-                SUM(CASE WHEN kind IN ('FIRE_LIT','FIRE_FED') THEN qty ELSE 0 END)
-           FROM (SELECT tick, kind,
-                        COALESCE(json_extract(payload_json, '$.qty'),
-                                 json_extract(payload_json, '$.wood'), 1) AS qty
-                   FROM events
-                  WHERE world_id = ?1
-                    AND kind IN ('CHOPPED','SHELTER_BUILT','SHELTER_REPAIRED',
-                                 'FIRE_LIT','FIRE_FED'))
-          GROUP BY 1 ORDER BY 1",
-    )?;
+                              THEN {wood} ELSE 0 END),
+                SUM(CASE WHEN kind IN ('FIRE_LIT','FIRE_FED') THEN {wood} ELSE 0 END)
+           FROM events
+          WHERE world_id = ?1
+            AND kind IN ('CHOPPED','SHELTER_BUILT','SHELTER_REPAIRED',
+                         'FIRE_LIT','FIRE_FED')
+          GROUP BY 1 ORDER BY 1"
+    );
+    let mut stmt = conn.prepare(&sql)?;
     let rows = stmt.query_map(rusqlite::params![world, width], |r| {
         Ok(WoodSplit {
             tick: r.get(0)?,
-            chopped: r.get(1)?,
-            timber: r.get(2)?,
-            fuel: r.get(3)?,
+            chopped: r.get::<_, Option<f64>>(1)?.unwrap_or(0.0),
+            timber: r.get::<_, Option<f64>>(2)?.unwrap_or(0.0),
+            fuel: r.get::<_, Option<f64>>(3)?.unwrap_or(0.0),
         })
     })?;
     Ok(rows.collect::<Result<Vec<_>, _>>()?)

@@ -14,6 +14,44 @@ use anyhow::Result;
 use rusqlite::Connection;
 use serde::Serialize;
 
+/// A numeric field out of an event payload, as a SQL expression.
+///
+/// `events.payload_json` is named for what it was going to be and holds what it
+/// actually is: space-separated `key=value` text. That is a deliberate trade —
+/// it is written on every event of every tick and parsed only when somebody
+/// opens a report — but it means `json_extract` raises "malformed JSON" against
+/// it, so the digging is done here instead.
+///
+/// Returns NULL rather than 0 when the key is absent, so a missing field is
+/// distinguishable from a recorded zero and `SUM` skips it instead of
+/// pretending the event carried no wood.
+pub(crate) fn payload_num(key: &str) -> String {
+    let k = format!("{key}=");
+    let n = k.len();
+    format!(
+        "(CASE WHEN instr(payload_json, '{k}') = 0 THEN NULL ELSE CAST(
+            substr(payload_json, instr(payload_json, '{k}') + {n},
+                   CASE WHEN instr(substr(payload_json, instr(payload_json, '{k}') + {n}), ' ') = 0
+                        THEN length(payload_json)
+                        ELSE instr(substr(payload_json, instr(payload_json, '{k}') + {n}), ' ') - 1
+                   END) AS REAL) END)"
+    )
+}
+
+/// The map's tile count, which lives in `worlds.config_json` and not in a
+/// column of its own.
+pub(crate) fn world_tiles(conn: &Connection, world: i64) -> f64 {
+    conn.query_row(
+        "SELECT json_extract(config_json, '$.map.width')
+              * json_extract(config_json, '$.map.height')
+           FROM worlds WHERE id = ?1",
+        [world],
+        |r| r.get::<_, i64>(0),
+    )
+    .unwrap_or(1)
+    .max(1) as f64
+}
+
 /// The four numbers at the top of the reporting view.
 #[derive(Debug, Clone, Serialize, Default)]
 pub struct Headline {
@@ -403,12 +441,7 @@ pub fn economy_series(conn: &Connection, world: i64, buckets: i64) -> Result<Vec
         .unwrap_or(0);
     let width = (last / buckets.max(1)).max(1);
 
-    let qty = "CAST(
-        substr(payload_json, instr(payload_json, 'qty=') + 4,
-               CASE WHEN instr(substr(payload_json, instr(payload_json, 'qty=') + 4), ' ') = 0
-                    THEN length(payload_json)
-                    ELSE instr(substr(payload_json, instr(payload_json, 'qty=') + 4), ' ') - 1
-               END) AS REAL)";
+    let qty = payload_num("qty");
 
     let sql = format!(
         "SELECT (tick / ?2) * ?2 AS bucket,
