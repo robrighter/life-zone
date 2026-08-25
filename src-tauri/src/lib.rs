@@ -8,6 +8,7 @@ pub mod ai;
 pub mod config;
 pub mod db;
 pub mod logging;
+pub mod report;
 pub mod sim;
 
 use anyhow::Result;
@@ -38,6 +39,8 @@ pub struct AppState {
     pub world_id: i64,
     pub sim: SimHandle,
     pub reader: Mutex<Connection>,
+    /// Where the database lives; CSV exports go beside it.
+    pub data_dir: std::path::PathBuf,
 }
 
 /// Pushes each snapshot to the webview as a Tauri event (`tick:complete`).
@@ -187,6 +190,134 @@ fn report_bench(result: serde_json::Value) {
     tracing::info!(target: "bench", result = %result, "render benchmark");
 }
 
+// ------------------------------------------------------------- reporting
+//
+// All of these run on the reader connection while the simulation writes on its
+// own. WAL makes that safe and it means opening a report can never stall a
+// tick — which matters more than it sounds, because the reporting view is
+// exactly what you open when something looks wrong and the run is still going.
+
+macro_rules! report_cmd {
+    ($name:ident, $query:path $(, $arg:ident : $ty:ty)*) => {
+        #[tauri::command]
+        fn $name(
+            state: tauri::State<'_, AppState>
+            $(, $arg: $ty)*
+        ) -> Result<serde_json::Value, String> {
+            let conn = state.reader.lock().map_err(|e| e.to_string())?;
+            let out = $query(&conn, state.world_id $(, $arg)*).map_err(|e| e.to_string())?;
+            serde_json::to_value(out).map_err(|e| e.to_string())
+        }
+    };
+}
+
+report_cmd!(report_headline, report::queries::headline);
+report_cmd!(report_population, report::queries::population_series, buckets: i64);
+report_cmd!(report_causes, report::queries::cause_of_death_by_generation);
+report_cmd!(report_age_at_death, report::queries::age_at_death, bucket: i64);
+report_cmd!(report_lineages, report::queries::deepest_lineages, limit: i64);
+report_cmd!(report_lineage_tree, report::queries::lineage_tree, founder: i64);
+report_cmd!(report_generations, report::queries::by_generation);
+report_cmd!(report_economy, report::queries::economy_series, buckets: i64);
+report_cmd!(report_farming, report::queries::farming_adoption);
+report_cmd!(report_actions, report::queries::action_distribution_by_tier);
+report_cmd!(report_deliberation, report::queries::deliberation_series, buckets: i64);
+report_cmd!(report_horizons, report::queries::horizon_gap);
+report_cmd!(report_aborts, report::queries::abort_reasons);
+report_cmd!(report_fallbacks, report::queries::fallback_reasons);
+report_cmd!(report_transmission, report::queries::transmission_by_channel);
+report_cmd!(report_beliefs, report::queries::belief_provenance);
+report_cmd!(report_roster, report::queries::roster, limit: i64);
+report_cmd!(report_life, report::queries::life, id: i64);
+
+/// Write every report to CSV and return where they went.
+///
+/// §10: "All reports exportable to CSV." Files rather than a download, because
+/// this is an offline desktop app and the interesting thing to do with these is
+/// open them in something else.
+#[tauri::command]
+fn export_reports_csv(state: tauri::State<'_, AppState>) -> Result<String, String> {
+    let conn = state.reader.lock().map_err(|e| e.to_string())?;
+    let w = state.world_id;
+    let dir = state.data_dir.join(format!("reports-world-{w}"));
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+
+    let mut wrote = 0usize;
+    macro_rules! dump {
+        ($file:literal, $value:expr) => {
+            let v = serde_json::to_value($value.map_err(|e| e.to_string())?)
+                .map_err(|e| e.to_string())?;
+            write_csv(&dir.join(concat!($file, ".csv")), &v).map_err(|e| e.to_string())?;
+            wrote += 1;
+        };
+    }
+    dump!("headline", report::queries::headline(&conn, w));
+    dump!("population", report::queries::population_series(&conn, w, 400));
+    dump!("cause_of_death_by_generation", report::queries::cause_of_death_by_generation(&conn, w));
+    dump!("age_at_death", report::queries::age_at_death(&conn, w, 48));
+    dump!("lineages", report::queries::deepest_lineages(&conn, w, 500));
+    dump!("generations", report::queries::by_generation(&conn, w));
+    dump!("economy", report::queries::economy_series(&conn, w, 400));
+    dump!("farming_adoption", report::queries::farming_adoption(&conn, w));
+    dump!("action_distribution_by_tier", report::queries::action_distribution_by_tier(&conn, w));
+    dump!("deliberation", report::queries::deliberation_series(&conn, w, 400));
+    dump!("horizon_gap", report::queries::horizon_gap(&conn, w));
+    dump!("abort_reasons", report::queries::abort_reasons(&conn, w));
+    dump!("fallback_reasons", report::queries::fallback_reasons(&conn, w));
+    dump!("transmission", report::queries::transmission_by_channel(&conn, w));
+    dump!("belief_provenance", report::queries::belief_provenance(&conn, w));
+    dump!("roster", report::queries::roster(&conn, w, 100_000));
+
+    tracing::info!(path = %dir.display(), files = wrote, "exported reports");
+    Ok(dir.display().to_string())
+}
+
+/// Serialise a report to CSV.
+///
+/// Generic over the report types by going through `serde_json::Value`: the
+/// alternative is sixteen bespoke writers that all drift apart, and the column
+/// order then comes from the struct definition, which is the one place it is
+/// already documented.
+fn write_csv(path: &std::path::Path, value: &serde_json::Value) -> anyhow::Result<()> {
+    use std::io::Write;
+    let rows: Vec<&serde_json::Value> = match value {
+        serde_json::Value::Array(a) => a.iter().collect(),
+        other => vec![other],
+    };
+    let mut out = std::fs::File::create(path)?;
+
+    let Some(first) = rows.first().and_then(|r| r.as_object()) else {
+        // An empty report is still a file: a missing one reads as a failure.
+        writeln!(out, "(no rows)")?;
+        return Ok(());
+    };
+    let headers: Vec<&String> = first.keys().collect();
+    writeln!(out, "{}", headers.iter().map(|h| h.as_str()).collect::<Vec<_>>().join(","))?;
+
+    for row in &rows {
+        let Some(obj) = row.as_object() else { continue };
+        let cells: Vec<String> = headers
+            .iter()
+            .map(|h| csv_cell(obj.get(*h).unwrap_or(&serde_json::Value::Null)))
+            .collect();
+        writeln!(out, "{}", cells.join(","))?;
+    }
+    Ok(())
+}
+
+fn csv_cell(v: &serde_json::Value) -> String {
+    let raw = match v {
+        serde_json::Value::Null => String::new(),
+        serde_json::Value::String(s) => s.clone(),
+        other => other.to_string(),
+    };
+    if raw.contains([',', '"', '\n']) {
+        format!("\"{}\"", raw.replace('"', "\"\""))
+    } else {
+        raw
+    }
+}
+
 /// Reuse the newest active world, or create one on first run.
 fn bootstrap_world(conn: &Connection) -> Result<WorldRow> {
     if let Some(existing) = repo::latest_active_world(conn)? {
@@ -317,6 +448,7 @@ pub fn run() {
                 world_id: world_row.id,
                 sim: handle,
                 reader: Mutex::new(reader),
+                data_dir,
             });
 
             tracing::info!(world_id = world_row.id, "startup complete");
@@ -333,7 +465,12 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             get_world, list_worlds, get_world_meta, get_terrain, get_nodes,
-            get_snapshot, sim_control, get_deaths_by_cause, bench_mode, report_bench
+            get_snapshot, sim_control, get_deaths_by_cause, bench_mode, report_bench,
+            report_headline, report_population, report_causes, report_age_at_death,
+            report_lineages, report_lineage_tree, report_generations, report_economy,
+            report_farming, report_actions, report_deliberation, report_horizons,
+            report_aborts, report_fallbacks, report_transmission, report_beliefs,
+            report_roster, report_life, export_reports_csv
         ])
         .run(tauri::generate_context!())
         .expect("error while running Life Zone");

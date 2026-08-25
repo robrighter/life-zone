@@ -12,6 +12,7 @@ const MIGRATIONS: &[(i32, &str, &str)] = &[
     (1, "001_initial", include_str!("migrations/001_initial.sql")),
     (2, "002_sim_state", include_str!("migrations/002_sim_state.sql")),
     (3, "003_society", include_str!("migrations/003_society.sql")),
+    (4, "004_reporting", include_str!("migrations/004_reporting.sql")),
 ];
 
 /// Open the database, apply pragmas, and bring the schema up to date.
@@ -37,7 +38,7 @@ pub fn open(path: &Path) -> Result<Connection> {
 }
 
 /// Apply any migrations newer than the recorded `user_version`.
-fn migrate(conn: &Connection) -> Result<()> {
+pub fn migrate(conn: &Connection) -> Result<()> {
     let current: i32 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
     let target = MIGRATIONS.last().map(|m| m.0).unwrap_or(0);
 

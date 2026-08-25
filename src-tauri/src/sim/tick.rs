@@ -88,6 +88,15 @@ pub struct TickReport {
     pub llm_rejected: u32,
     pub llm_failed: u32,
     pub mean_latency_ms: Option<f32>,
+    /// How many distinct tiles the living population collectively knows, or
+    /// `None` on ticks where it was not sampled.
+    ///
+    /// Sampled rather than maintained incrementally: the exact answer needs a
+    /// refcount hooked into every belief gain and loss across the whole
+    /// codebase, and the union over ~500 creatures costs ~2ms once every 24
+    /// ticks — 0.08ms/tick amortised against a 50ms budget. The report buckets
+    /// this anyway, so per-tick resolution would be thrown away on arrival.
+    pub known_tiles: Option<u32>,
     /// Arrivals from the measurement fixture, counted separately from births.
     /// Folding them into `births` made a held run look like a fertile one —
     /// 4,733 "births" in a run with zero conceptions — which is exactly the
@@ -258,6 +267,14 @@ pub struct PlanOutcome {
     pub set_tick: i64,
     pub horizon_actual: u32,
     pub reason: AbortReason,
+    /// How far the belief that sent the creature here had travelled, recorded
+    /// only when the plan died because the target was gone or empty.
+    ///
+    /// §10 asks for belief accuracy *by hop count*, and that question is
+    /// unanswerable from the abort reason alone: `TARGET_GONE` at hop 0 means
+    /// the world moved on, at hop 3 it means the chain of retelling was wrong.
+    /// §4.11's whole premise is that those are different failures.
+    pub belief_hops: Option<u8>,
 }
 
 /// The simulation. Owns all world state exclusively (PRD §3.1): nothing here is
@@ -571,9 +588,20 @@ impl Sim {
 
     /// Run one tick: the seven phases of §4.2, in order.
     pub fn step(&mut self) -> TickReport {
+        // `spawn_founders` and `spawn_population` run outside the tick cycle,
+        // so the births they record are sitting in the outbox before tick 1
+        // begins. Clearing unconditionally threw away the birth record of the
+        // entire founding generation — every seeded creature had a death in the
+        // log and no beginning.
+        //
+        // Found by the S5 test on its first run, which is precisely what that
+        // criterion is for: "any creature's full life is reconstructable from
+        // the DB" is not a property you can establish by looking at the code.
+        if self.tick > 0 {
+            self.events.clear();
+        }
         self.tick += 1;
         self.rng = tick_rng(self.seed, self.tick);
-        self.events.clear();
         self.decisions.clear();
         self.plan_outcomes.clear();
         self.transmissions.clear();
@@ -853,6 +881,10 @@ impl Sim {
                     set_tick: plan.set_tick,
                     horizon_actual: actual,
                     reason,
+                    // Horizon expiry and crisis interruption are not the
+                    // world proving a belief wrong, so there is no belief to
+                    // blame and recording one would poison the accuracy chart.
+                    belief_hops: None,
                 });
                 if reason != AbortReason::Completed && reason != AbortReason::HorizonExpired {
                     report.plans_abandoned += 1;
@@ -1337,11 +1369,29 @@ impl Sim {
             match failure {
                 Some(reason) if reason != AbortReason::Completed => {
                     let actual = (self.tick - plan.set_tick).max(0) as u32;
+                    // Walked there, and it was not what the creature thought.
+                    // The freshest belief covering the tile is the one that
+                    // was acted on, so it is the one that was wrong.
+                    let belief_hops = matches!(
+                        reason,
+                        AbortReason::TargetGone | AbortReason::TargetDepleted
+                    )
+                    .then(|| {
+                        let tile =
+                            plan.steps.get(plan.step_index)?.target.tile(&self.world)?;
+                        c.beliefs
+                            .iter()
+                            .filter(|b| (b.x, b.y) == tile)
+                            .map(|b| b.hops)
+                            .min()
+                    })
+                    .flatten();
                     self.plan_outcomes.push(PlanOutcome {
                         creature_id: c.id,
                         set_tick: plan.set_tick,
                         horizon_actual: actual,
                         reason,
+                        belief_hops,
                     });
                     report.plans_abandoned += 1;
                     // No plan next tick means phase 3 flags it and phase 4
@@ -2122,6 +2172,20 @@ impl Sim {
         // instead of two smaller ones.
         let sample = p.sample_interval_ticks > 0
             && self.tick % p.sample_interval_ticks as i64 == (p.sample_interval_ticks / 2) as i64;
+
+        // §10's collective known-map coverage, sampled on the same cadence. The
+        // union has to be taken over the *living* only: a dead creature's
+        // beliefs stay in the table (that is what answers S7), but they are not
+        // part of what the community currently knows, and counting them would
+        // make coverage a monotonic line that can never show the collapse the
+        // report exists to catch.
+        if sample {
+            let mut tiles: std::collections::BTreeSet<(u32, u32)> = Default::default();
+            for c in self.creatures.iter().filter(|c| c.is_alive()) {
+                tiles.extend(c.beliefs.iter().map(|b| (b.x, b.y)));
+            }
+            report.known_tiles = Some(tiles.len() as u32);
+        }
         // Beliefs are flushed on a rolling basis: a slice of the population
         // each tick rather than all of it at once. Writing ~19,500 belief rows
         // in one go was a 164ms tick, and beliefs live in RAM during a run

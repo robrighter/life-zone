@@ -334,7 +334,7 @@ pub fn backfill_plan_outcomes(
         return Ok(());
     }
     let mut stmt = tx.prepare_cached(
-        "UPDATE decisions SET horizon_actual = ?4, abort_reason = ?5
+        "UPDATE decisions SET horizon_actual = ?4, abort_reason = ?5, belief_hops = ?6
          WHERE world_id = ?1 AND creature_id = ?2 AND tick = ?3",
     )?;
     for o in outcomes {
@@ -344,6 +344,7 @@ pub fn backfill_plan_outcomes(
             o.set_tick,
             o.horizon_actual as i64,
             o.reason.as_str(),
+            o.belief_hops.map(|h| h as i64),
         ])?;
     }
     Ok(())
@@ -354,8 +355,8 @@ pub fn insert_tick_stats(tx: &Transaction, world_id: i64, r: &TickReport) -> Res
     tx.prepare_cached(
         "INSERT OR REPLACE INTO tick_stats
            (world_id, tick, population, births, deaths, llm_calls, fallbacks,
-            mean_latency_ms, phase_timings_json)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            mean_latency_ms, phase_timings_json, known_tiles)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
     )?
     .execute(rusqlite::params![
         world_id,
@@ -369,6 +370,7 @@ pub fn insert_tick_stats(tx: &Transaction, world_id: i64, r: &TickReport) -> Res
         (r.llm_rejected + r.llm_failed) as i64,
         r.mean_latency_ms,
         timings,
+        r.known_tiles.map(|n| n as i64),
     ])?;
     Ok(())
 }
