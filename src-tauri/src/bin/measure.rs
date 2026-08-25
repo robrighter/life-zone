@@ -126,6 +126,7 @@ fn report_dump(path: &str) {
     show!("pressure distribution", culture::pressure_distribution(&conn, w));
     show!("latency", culture::latency(&conn, w));
     show!("horizon gap", queries::horizon_gap(&conn, w));
+    show!("horizon by goal", culture::horizon_by_goal(&conn, w));
     show!("abort reasons", queries::abort_reasons(&conn, w));
     show!("fallback reasons", queries::fallback_reasons(&conn, w));
 

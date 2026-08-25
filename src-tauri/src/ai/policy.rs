@@ -230,11 +230,47 @@ fn night_proximity(ctx: &PolicyCtx) -> f32 {
 fn travel_ticks(c: &Creature, cfg: &WorldConfig, to: (u32, u32)) -> u32 {
     let dx = c.x.abs_diff(to.0) as f32;
     let dy = c.y.abs_diff(to.1) as f32;
-    let (lo, hi) = if dx < dy { (dx, dy) } else { (dy, dx) };
-    let dist = (hi - lo) + lo * std::f32::consts::SQRT_2;
-    // Assume average terrain rather than best case; over-optimistic estimates
-    // produce horizons that expire mid-journey.
-    ((dist * 1.25 / cfg.actions.move_speed.max(0.1)).ceil() as u32).max(1)
+
+    // Chebyshev, because a tick is a *tile* — not octile, and with no terrain
+    // multiplier.
+    //
+    // Both of those were charging for costs the movement code does not levy.
+    // `advance_move` spends a budget of `speed` along the path but takes the
+    // next tile anyway when nothing has moved yet, so neither a diagonal step
+    // (√2) nor rough ground (up to 2.2) can ever drop a creature below one tile
+    // per tick. Measured over 19,805 arrivals: 1.08 ticks per tile, and for
+    // paths of 8 tiles or more, ticks and tiles were equal to two decimal
+    // places.
+    //
+    // The old octile × 1.25 therefore ran ~1.5× long (measured: est/tiles 1.60
+    // overall, 1.47 on long paths). Since a plan's committed horizon is the sum
+    // of its steps' estimates and 86% of all committed ticks sit under a
+    // MOVE_TO, that single factor was most of the population-wide abandonment
+    // gap — and Tier 1 is the control S6 is judged against, so an estimate that
+    // is wrong by half is not a neutral inaccuracy.
+    //
+    // The 1.1 is for path bending around obstacles, which is the one real cost
+    // the straight-line distance misses; it is what the residual 1.08 measures.
+    let tiles = dx.max(dy) * 1.1;
+    // Only a configured speed *above* one tile per tick can beat the floor, so
+    // that is the only case where dividing is right.
+    ((tiles / cfg.actions.move_speed.max(1.0)).ceil() as u32).max(1)
+}
+
+/// How long resting will actually take: the ticks needed to reach the fatigue
+/// level at which `actions::rest` reports the step complete.
+///
+/// The estimate used to be a flat 6 or 8 regardless of how tired the creature
+/// was. Rest ends the moment fatigue passes 99, so a creature that lies down at
+/// 94 is up again on the next tick — measured across 13,457 rest plans, 98.9%
+/// completed and the mean duration was 0.025 ticks against a committed 6.
+fn rest_ticks(c: &Creature, cfg: &WorldConfig) -> u32 {
+    let restore = if c.in_shelter.is_some() {
+        cfg.actions.rest_restore_sheltered
+    } else {
+        cfg.actions.rest_restore
+    };
+    (((99.0 - c.fatigue) / restore.max(0.1)).ceil().max(1.0) as u32).min(24)
 }
 
 /// A scored option: what to do, why, and how good it looks.
@@ -257,10 +293,20 @@ pub fn decide(c: &Creature, ctx: &PolicyCtx, rng: &mut ChaCha8Rng) -> Plan {
     let needs = need_profile(c, ctx);
     let mut best: Option<Candidate> = None;
 
-    let mut offer = |cand: Candidate| {
+    let mut offer = |mut cand: Candidate| {
         if cand.score <= 0.0 || cand.steps.is_empty() {
             return;
         }
+        // §5.4's elder habit prior. An elder leans toward the kind of plan that
+        // has worked for it before, which is what lets §13.10 ask whether
+        // elders need deliberation at all.
+        //
+        // This multiplier was written, unit-tested, and never called from
+        // anywhere: `Creature::habit` was initialised to zeros, serialised, and
+        // never incremented. That left Tier 1 weaker than specified — and Tier
+        // 1 is the control S6 is judged against, so an unwired improvement to
+        // it is a thumb on the scale in the model's favour.
+        cand.score *= crate::ai::budget::habit_bonus(c, cand.addresses, ctx.cfg);
         if best.as_ref().is_none_or(|b| cand.score > b.score) {
             best = Some(cand);
         }
@@ -282,7 +328,7 @@ pub fn decide(c: &Creature, ctx: &PolicyCtx, rng: &mut ChaCha8Rng) -> Plan {
         if let Some(g) = c.guardian_id.filter(|g| ctx.people.get(*g).is_some()) {
             steps.push(Step::new(Goal::Follow, Target::Creature(g), 12));
         } else {
-            steps.push(Step::new(Goal::Rest, Target::None, 6));
+            steps.push(Step::new(Goal::Rest, Target::None, rest_ticks(c, ctx.cfg)));
         }
         return finish(
             c, ctx, steps,
@@ -432,7 +478,7 @@ pub fn decide(c: &Creature, ctx: &PolicyCtx, rng: &mut ChaCha8Rng) -> Plan {
         } else {
             steps.push(Step::new(Goal::Shelter, Target::None, 1));
         }
-        steps.push(Step::new(Goal::Rest, Target::None, ticks_until_dawn(ctx).max(8)));
+        steps.push(Step::new(Goal::Rest, Target::None, rest_ticks(c, ctx.cfg)));
 
         // Home pulls harder than any shelter that merely has a spare bed:
         // walking twenty tiles to sleep somewhere else is worse than lighting a
@@ -463,7 +509,7 @@ pub fn decide(c: &Creature, ctx: &PolicyCtx, rng: &mut ChaCha8Rng) -> Plan {
                 score: pressure(c.warmth, warmth_decay(ctx), 1).max(0.4) * 2.2,
                 steps: vec![
                     Step::new(Goal::BuildFire, Target::None, 1),
-                    Step::new(Goal::Rest, Target::None, ticks_until_dawn(ctx).max(6)),
+                    Step::new(Goal::Rest, Target::None, rest_ticks(c, ctx.cfg)),
                 ],
                 addresses: Addresses::Warmth,
                 rationale: "No roof in reach. Burn what I carry.".into(),
@@ -475,7 +521,7 @@ pub fn decide(c: &Creature, ctx: &PolicyCtx, rng: &mut ChaCha8Rng) -> Plan {
             score: 0.9,
             steps: vec![
                 Step::new(Goal::FeedFire, Target::None, 1),
-                Step::new(Goal::Rest, Target::None, 6),
+                Step::new(Goal::Rest, Target::None, rest_ticks(c, ctx.cfg)),
             ],
             addresses: Addresses::Warmth,
             rationale: "Keep the fire in.".into(),
@@ -487,7 +533,7 @@ pub fn decide(c: &Creature, ctx: &PolicyCtx, rng: &mut ChaCha8Rng) -> Plan {
     if c.fatigue < 55.0 {
         offer(Candidate {
             score: pressure(c.fatigue, n.fatigue_decay_per_tick, 0) * 1.0,
-            steps: vec![Step::new(Goal::Rest, Target::None, 8)],
+            steps: vec![Step::new(Goal::Rest, Target::None, rest_ticks(c, ctx.cfg))],
             addresses: Addresses::Rest,
             rationale: "Worn out.".into(),
             confidence: 1.0,
@@ -725,7 +771,7 @@ pub fn decide(c: &Creature, ctx: &PolicyCtx, rng: &mut ChaCha8Rng) -> Plan {
         Some(b) => finish(c, ctx, b.steps, b.rationale, b.confidence, b.addresses),
         // Every branch above can decline; resting is always available and
         // always defensible, so a creature can never end a tick without a plan.
-        None => finish(c, ctx, vec![Step::new(Goal::Rest, Target::None, 4)],
+        None => finish(c, ctx, vec![Step::new(Goal::Rest, Target::None, rest_ticks(c, ctx.cfg))],
                        "Nothing to be done.".into(), 1.0, Addresses::Rest),
     }
 }
@@ -759,7 +805,8 @@ fn social_run(c: &Creature, ctx: &PolicyCtx) -> Option<Candidate> {
 
     let n = &ctx.cfg.needs;
     let mut best: Option<Candidate> = None;
-    let mut offer = |cand: Candidate| {
+    let mut offer = |mut cand: Candidate| {
+        cand.score *= crate::ai::budget::habit_bonus(c, cand.addresses, ctx.cfg);
         if cand.score > 0.0 && best.as_ref().is_none_or(|b| cand.score > b.score) {
             best = Some(cand);
         }

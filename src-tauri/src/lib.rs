@@ -244,6 +244,7 @@ report_cmd!(report_elders, report::culture::elder_autonomy);
 report_cmd!(report_pressure, report::culture::pressure_distribution);
 report_cmd!(report_latency, report::culture::latency);
 report_cmd!(report_horizon_gen, report::culture::horizon_by_generation);
+report_cmd!(report_horizon_goal, report::culture::horizon_by_goal);
 report_cmd!(report_roles, report::culture::roles);
 report_cmd!(report_action_gen, report::culture::actions_by_generation);
 report_cmd!(report_wealth, report::culture::household_wealth);
@@ -300,6 +301,7 @@ fn export_reports_csv(state: tauri::State<'_, AppState>) -> Result<String, Strin
     dump!("pressure_distribution", report::culture::pressure_distribution(&conn, w));
     dump!("latency", report::culture::latency(&conn, w));
     dump!("horizon_by_generation", report::culture::horizon_by_generation(&conn, w));
+    dump!("horizon_by_goal", report::culture::horizon_by_goal(&conn, w));
     dump!("roles", report::culture::roles(&conn, w));
     dump!("actions_by_generation", report::culture::actions_by_generation(&conn, w));
     dump!("household_wealth", report::culture::household_wealth(&conn, w));
@@ -511,7 +513,7 @@ pub fn run() {
             report_coverage, report_half_life, report_accuracy, report_teaching,
             report_graph, report_s6, report_planners, report_survival,
             report_stage_compute, report_elders, report_pressure, report_latency,
-            report_horizon_gen, report_roles, report_action_gen, report_wealth,
+            report_horizon_gen, report_horizon_goal, report_roles, report_action_gen, report_wealth,
             report_wood
         ])
         .run(tauri::generate_context!())

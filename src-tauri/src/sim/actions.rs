@@ -667,6 +667,16 @@ fn advance_move(c: &mut Creature, step: &mut Step, ctx: &mut ActionCtx) -> Outco
 }
 
 fn arrive(c: &mut Creature, step: &Step, ctx: &mut ActionCtx) -> Outcome {
+    // What the walk was estimated to cost against what it cost. §5.5's horizon
+    // is the sum of these estimates, so an error here is an error in every
+    // committed horizon, and the abandonment gap cannot be read without it.
+    ctx.events.push(
+        Event::new(ctx.tick, EventKind::Arrived, c.id)
+            .at(c.x, c.y)
+            .with_int("est", step.est_ticks as i64)
+            .with_int("took", step.elapsed as i64)
+            .with_int("tiles", step.path.len() as i64),
+    );
     // The looking itself happens in the observation phase, which runs every
     // tick for every creature; arriving is what puts the creature in a position
     // to see. If the belief was wrong, that is where it gets corrected — and

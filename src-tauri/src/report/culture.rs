@@ -676,6 +676,79 @@ pub fn horizon_by_generation(conn: &Connection, world: i64) -> Result<Vec<Horizo
 // ------------------------------------------------------------------- behaviour
 
 #[derive(Debug, Clone, Serialize)]
+pub struct GoalHorizon {
+    pub goal: String,
+    pub plans: i64,
+    pub committed: f64,
+    pub actual: f64,
+    /// actual / committed. Well under 1.0 means the estimate is too long, not
+    /// that the plan was abandoned — the completion rate beside it separates
+    /// those two readings, which is the whole point of the pairing.
+    pub ratio: f64,
+    pub completion_rate: f64,
+    /// Mean actual duration of the plans that *finished*, and the mean horizon
+    /// **those same plans** committed to.
+    ///
+    /// The pair has to be restricted to the same set. Comparing the actual of
+    /// completed plans against the committed of all plans reads as a large
+    /// over-estimate no matter what, because the plans that get interrupted are
+    /// the long ones — so the survivors are short by selection, not by
+    /// misjudgement. `completed_ratio` is the only ratio here that is not
+    /// confounded that way.
+    pub completed_actual: f64,
+    pub completed_committed: f64,
+    pub completed_ratio: f64,
+}
+
+/// The abandonment gap, per goal (§5.5, §10).
+///
+/// The population-wide gap says commitment runs about four times longer than
+/// the work; it cannot say *which* work is misjudged. Since a plan's horizon is
+/// the sum of its steps' `est_ticks`, one badly estimated goal drags every plan
+/// that contains it, and every plan starts with a MOVE_TO.
+///
+/// Read the two right-hand columns together. A low ratio with a *high*
+/// completion rate is an over-long estimate — the plan finished fine, early. A
+/// low ratio with a low completion rate is a plan that keeps getting
+/// interrupted. Those need opposite fixes, and the population-wide number
+/// cannot tell them apart.
+pub fn horizon_by_goal(conn: &Connection, world: i64) -> Result<Vec<GoalHorizon>> {
+    let mut stmt = conn.prepare(
+        "SELECT COALESCE(json_extract(parsed_plan_json, '$.goal'), 'UNKNOWN'),
+                COUNT(*), AVG(horizon_committed), AVG(horizon_actual),
+                AVG(CASE WHEN abort_reason = 'COMPLETED' THEN 1.0 ELSE 0.0 END),
+                AVG(CASE WHEN abort_reason = 'COMPLETED' THEN horizon_actual END),
+                AVG(CASE WHEN abort_reason = 'COMPLETED' THEN horizon_committed END)
+           FROM decisions
+          WHERE world_id = ?1 AND horizon_actual IS NOT NULL
+                AND horizon_committed IS NOT NULL
+          GROUP BY 1
+          HAVING COUNT(*) > 20
+          ORDER BY 2 DESC",
+    )?;
+    let rows = stmt.query_map([world], |r| {
+        let committed: f64 = r.get(2)?;
+        let actual: f64 = r.get(3)?;
+        Ok(GoalHorizon {
+            goal: r.get(0)?,
+            plans: r.get(1)?,
+            committed,
+            actual,
+            ratio: if committed > 0.0 { actual / committed } else { 0.0 },
+            completion_rate: r.get(4)?,
+            completed_actual: r.get::<_, Option<f64>>(5)?.unwrap_or(0.0),
+            completed_committed: r.get::<_, Option<f64>>(6)?.unwrap_or(0.0),
+            completed_ratio: {
+                let a = r.get::<_, Option<f64>>(5)?.unwrap_or(0.0);
+                let c = r.get::<_, Option<f64>>(6)?.unwrap_or(0.0);
+                if c > 0.0 { a / c } else { 0.0 }
+            },
+        })
+    })?;
+    Ok(rows.collect::<Result<Vec<_>, _>>()?)
+}
+
+#[derive(Debug, Clone, Serialize)]
 pub struct RoleRow {
     pub generation: i64,
     pub role: String,

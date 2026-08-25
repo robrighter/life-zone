@@ -1437,6 +1437,24 @@ impl Sim {
                 }
                 _ => {
                     if plan.is_done() {
+                        // A plan that worked is the only thing a habit can be a
+                        // habit *of* (§5.4), and this is the one place a plan is
+                        // known to have worked.
+                        let c = &mut self.creatures[i];
+                        let slot = crate::ai::budget::habit_index(plan.addresses);
+                        c.habit[slot] = c.habit[slot].saturating_add(1);
+                        if c.habit[slot] == u8::MAX {
+                            // Halve the whole row rather than let one counter
+                            // pin: the shares are what `habit_bonus` reads, and
+                            // halving preserves them while leaving room to keep
+                            // learning. A pinned counter would freeze an elder
+                            // into whatever it did most of before it saturated.
+                            for v in c.habit.iter_mut() {
+                                *v /= 2;
+                            }
+                        }
+                        c.dirty = true;
+
                         // A finished plan is recorded *here*, because here is
                         // where it ends: it is not put back, so phase 6 never
                         // sees it and the `is_done()` branch there can never
@@ -2189,7 +2207,19 @@ impl Sim {
         // consumption line is flat zero for every run ever recorded, which is
         // what it was until the reporting view was pointed at a real database.
         let mut ate_qty = 0.0f32;
+        // Arrivals are ~50 a tick at 400 creatures, so they are collapsed like
+        // the rest — but the estimate/actual pair they carry is the only direct
+        // measurement of whether §5.5's horizons are built on a sound number,
+        // so the totals survive the collapse even though the rows do not.
+        let (mut arrivals, mut est, mut took, mut tiles) = (0u32, 0i64, 0i64, 0i64);
         self.events.retain(|e| {
+            if e.kind == K::Arrived {
+                arrivals += 1;
+                est += e.num("est").unwrap_or(0.0) as i64;
+                took += e.num("took").unwrap_or(0.0) as i64;
+                tiles += e.num("tiles").unwrap_or(0.0) as i64;
+                return false;
+            }
             if let Some(i) = ROUTINE.iter().position(|k| *k == e.kind) {
                 counts[i] += 1;
                 if e.kind == K::Ate {
@@ -2210,6 +2240,15 @@ impl Sim {
                 ev = ev.with_int(&kind.as_str().to_lowercase(), counts[i] as i64);
             }
             self.events.push(ev);
+        }
+        if arrivals > 0 {
+            self.events.push(
+                Event::new(self.tick, K::Arrived, 0)
+                    .with_int("n", arrivals as i64)
+                    .with_int("est", est)
+                    .with_int("took", took)
+                    .with_int("tiles", tiles),
+            );
         }
         if ate_qty > 0.0 {
             // One aggregate ATE a tick with the summed quantity, so the
@@ -2746,6 +2785,39 @@ mod tests {
         }
         let after: usize = sim.creatures.iter().map(|c| c.beliefs.len()).sum();
         assert!(after > before, "exploring should teach a creature something: {before} -> {after}");
+    }
+
+    #[test]
+    fn plans_that_work_become_habits() {
+        // `ai::budget::habit_bonus` was written, unit-tested against a
+        // hand-built creature, and never called from anywhere — while
+        // `Creature::habit` stayed at zero for every creature in every run.
+        // Both halves passed their own tests; nothing checked that the two were
+        // connected. This is that check.
+        //
+        // It matters beyond tidiness: §5.4's habit prior is part of Tier 1, and
+        // Tier 1 is the control S6 is judged against. An unwired improvement to
+        // the control quietly flatters the model.
+        let mut cfg = small_cfg();
+        cfg.bench.maintain_population = Some(60);
+        let mut sim = sim_with(44127, 60, cfg);
+        for _ in 0..300 {
+            sim.step();
+        }
+        let total: u32 =
+            sim.creatures.iter().map(|c| c.habit.iter().map(|v| *v as u32).sum::<u32>()).sum();
+        assert!(
+            total > 0,
+            "300 ticks and not one plan was recorded as having become a habit, \
+             which is what habit_bonus reads and what makes it a no-op"
+        );
+        // Saturation must not pin a counter: `habit_bonus` reads shares, and a
+        // pinned row would freeze an elder into whatever it did before it
+        // saturated.
+        assert!(
+            sim.creatures.iter().all(|c| c.habit.iter().all(|v| *v < u8::MAX)),
+            "a habit counter reached its ceiling without the row being halved"
+        );
     }
 
     #[test]
