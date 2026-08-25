@@ -357,7 +357,7 @@ pub fn is_legal(
         Goal::Rest => true,
 
         Goal::Shelter => structures
-            .nearest_shelter(c.x, c.y, 1, c.household_id)
+            .nearest_shelter(c.x, c.y, 1)
             .is_some_and(|s| s.has_room()),
 
         Goal::BuildFire => {
@@ -745,7 +745,7 @@ fn shelter(c: &mut Creature, ctx: &mut ActionCtx) -> Outcome {
     if c.in_shelter.is_some() {
         return Outcome::StepComplete;
     }
-    let Some(id) = ctx.structures.nearest_shelter(c.x, c.y, 1, c.household_id).map(|s| s.id) else {
+    let Some(id) = ctx.structures.nearest_shelter(c.x, c.y, 1).map(|s| s.id) else {
         // Why it failed, because "precondition failed" on a warmth errand is
         // 39% of all plan endings and the two causes need opposite fixes.
         let any = ctx

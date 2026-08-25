@@ -485,7 +485,7 @@ pub fn decide(c: &Creature, ctx: &PolicyCtx, rng: &mut ChaCha8Rng) -> Plan {
         .map(|(_, hx, hy)| (hx, hy, None))
         .or_else(|| {
             ctx.structures
-                .nearest_shelter(c.x, c.y, 40, c.household_id)
+                .nearest_shelter(c.x, c.y, 40)
                 .map(|s| (s.x, s.y, Some(s.id)))
         });
     if let Some((sx, sy, sid)) = bed {
@@ -523,7 +523,7 @@ pub fn decide(c: &Creature, ctx: &PolicyCtx, rng: &mut ChaCha8Rng) -> Plan {
         });
     }
 
-    let roof_in_reach = ctx.structures.nearest_shelter(c.x, c.y, 8, c.household_id).is_some();
+    let roof_in_reach = ctx.structures.nearest_shelter(c.x, c.y, 8).is_some();
     if ctx.cfg.features.fires
         && (ctx.night || night_proximity(ctx) > 0.6)
         && !lit_fire_near
@@ -745,7 +745,7 @@ pub fn decide(c: &Creature, ctx: &PolicyCtx, rng: &mut ChaCha8Rng) -> Plan {
         && c.hunger > 40.0
         && c.thirst > 40.0
     {
-        if let Some(s) = ctx.structures.nearest_shelter(c.x, c.y, 60, c.household_id) {
+        if let Some(s) = ctx.structures.nearest_shelter(c.x, c.y, 60) {
             let t = travel_ticks(c, ctx.cfg, (s.x, s.y));
             if t > 1 {
                 offer(Candidate {
